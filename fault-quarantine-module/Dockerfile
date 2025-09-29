@@ -24,10 +24,22 @@ ENV CGO_ENABLED=0
 
 WORKDIR /go/src
 
-COPY fault-quarantine-module ./fault-quarantine-module
-COPY platform-connectors ./platform-connectors
-COPY statemanager ./statemanager
+# Copy go modules and dependencies
+COPY fault-quarantine-module/go.mod fault-quarantine-module/go.sum ./fault-quarantine-module/
+COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
+COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
+COPY statemanager/go.mod statemanager/go.sum ./statemanager/
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
+COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+
+# Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/
+COPY platform-connectors/ ./platform-connectors/
+COPY statemanager/ ./statemanager/
+COPY health-monitors/ ./health-monitors/
+
+# Copy main module source
+COPY fault-quarantine-module/ ./fault-quarantine-module/
 
 WORKDIR /go/src/fault-quarantine-module
 

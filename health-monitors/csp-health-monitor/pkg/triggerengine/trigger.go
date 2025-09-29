@@ -22,10 +22,10 @@ import (
 	"time"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -56,7 +56,7 @@ const (
 // Engine polls the datastore for maintenance events and forwards the
 // corresponding health signals to NVSentinel through the UDS connector.
 type Engine struct {
-	store           datastore.Store
+	store           datastore.DataStore
 	udsClient       pb.PlatformConnectorClient
 	config          *config.Config
 	pollInterval    time.Duration
@@ -68,7 +68,7 @@ type Engine struct {
 // NewEngine constructs a ready-to-run Engine instance.
 func NewEngine(
 	cfg *config.Config,
-	store datastore.Store,
+	store datastore.DataStore,
 	udsClient pb.PlatformConnectorClient,
 	k8sClient kubernetes.Interface,
 ) *Engine {
@@ -117,7 +117,7 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 
 	// --- Check for quarantine triggers ---
 	startQuery := time.Now()
-	quarantineEvents, err := e.store.FindEventsToTriggerQuarantine(ctx, triggerLimit)
+	quarantineEvents, err := e.store.MaintenanceEventStore().FindEventsToTriggerQuarantine(ctx, triggerLimit)
 	queryDuration := time.Since(startQuery).Seconds()
 	metrics.TriggerDatastoreQueryDuration.WithLabelValues(queryTypeQuarantine).Observe(queryDuration)
 
@@ -148,7 +148,7 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 
 	// --- Check for healthy triggers ---
 	startQuery = time.Now()
-	healthyEvents, err := e.store.FindEventsToTriggerHealthy(ctx, healthyDelay)
+	healthyEvents, err := e.store.MaintenanceEventStore().FindEventsToTriggerHealthy(ctx, healthyDelay)
 	queryDuration = time.Since(startQuery).Seconds()
 	metrics.TriggerDatastoreQueryDuration.WithLabelValues(queryTypeHealthy).Observe(queryDuration)
 
@@ -268,7 +268,7 @@ func (e *Engine) processAndSendTrigger(
 		)
 	}
 
-	dbErr := e.store.UpdateEventStatus(ctx, event.EventID, targetDBStatus)
+	dbErr := e.store.MaintenanceEventStore().UpdateEventStatus(ctx, event.EventID, targetDBStatus)
 	if dbErr != nil {
 		metrics.TriggerDatastoreUpdateErrors.WithLabelValues(triggerType).Inc()
 		metrics.TriggerFailures.WithLabelValues(triggerType, failureReasonDBUpdate).Inc()
@@ -546,7 +546,9 @@ func (e *Engine) monitorNodeReadiness(ctx context.Context, nodeName, eventID str
 
 				metrics.NodeNotReadyTimeout.WithLabelValues(nodeName).Inc()
 
-				if err := e.store.UpdateEventStatus(ctx, eventID, model.StatusNodeReadinessTimeout); err != nil {
+				if err := e.store.MaintenanceEventStore().UpdateEventStatus(
+					ctx, eventID, model.StatusNodeReadinessTimeout,
+				); err != nil {
 					klog.Errorf("Failed to update event %s status to NODE_READINESS_TIMEOUT: %v", eventID, err)
 				}
 			} else if err != nil {

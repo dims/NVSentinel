@@ -15,7 +15,10 @@
 load('ext://helm_resource', 'helm_resource', 'helm_repo')
 load('ext://namespace', 'namespace_create', 'namespace_inject')
 
-update_settings(k8s_upsert_timeout_secs=600)
+update_settings(
+    k8s_upsert_timeout_secs=600,
+    suppress_unused_image_warnings=["nvcr.io/nv-ngc-devops/nvsentinel-nvswitch-health-monitor"]
+)
 
 num_gpu_nodes = int(os.getenv('NUM_GPU_NODES', '50'))
 
@@ -65,6 +68,24 @@ helm_resource(
 namespace_create('gpu-operator')
 namespace_create('nvsentinel')
 
+# Create NGC pull secret if NGC_API_KEY is set
+NGC_API_KEY = os.environ.get('NGC_API_KEY', '')
+if NGC_API_KEY:
+    # Escape the API key to handle special characters
+    escaped_api_key = NGC_API_KEY.replace('"', '\\"').replace('$', '\\$')
+    local_resource(
+        'create-ngc-secret',
+        'kubectl create namespace nvsentinel --dry-run=client -o yaml | kubectl apply -f - && ' +
+        'kubectl create secret docker-registry nvidia-ngcuser-pull-secret ' +
+        '--docker-server=nvcr.io ' +
+        '--docker-username=\'$oauthtoken\' ' +
+        '--docker-password=\'' + escaped_api_key + '\' ' +
+        '--docker-email=noreply@nvidia.com ' +
+        '-n nvsentinel ' +
+        '--dry-run=client -o yaml | kubectl apply -f -',
+        labels=['setup']
+    )
+
 kwok_node_template = str(read_file('./tilt/kwok-node-template.yaml'))
 for i in range(num_gpu_nodes):
     node_yaml = kwok_node_template.replace('PLACEHOLDER', str(i))
@@ -78,6 +99,7 @@ include('./fault-quarantine-module/Tiltfile')
 include('./fault-remediation-module/Tiltfile')
 include('./node-drainer-module/Tiltfile')
 include('./platform-connectors/Tiltfile')
+include('./health-events-analyzer/Tiltfile')
 include('./tilt/simple-health-client/Tiltfile')
 #include('./health-events-analyzer/Tiltfile') # This module was a proof-of-concept, never completed
 include('./health-monitors/gpu-health-monitor/Tiltfile')
@@ -111,6 +133,7 @@ k8s_resource(
     objects=['nvsentinel-pod-monitor:podmonitor'],
     resource_deps=['prometheus-operator'],
 )
+
 k8s_resource(
     'prometheus-operator',
     port_forwards='9090:9090',
@@ -120,9 +143,9 @@ kwok_node_names = ['kwok-node-' + str(i) + ':node' for i in range(num_gpu_nodes)
 k8s_resource(
     new_name='kwok-fake-nodes',
     objects=kwok_node_names,
-    resource_deps=['kwok', 'nvsentinel-platform-connector', 'nvsentinel-fault-quarantine', 'nvsentinel-fault-remediation', 
+    resource_deps=['kwok', 'nvsentinel-platform-connector', 'nvsentinel-fault-quarantine', 'nvsentinel-fault-remediation',
         'nvsentinel-labeler', 'nvsentinel-node-drainer', 'nvsentinel-mongodb', 'simple-health-client'
-    ], 
+    ],
 )
 k8s_resource(
     'kwok-stage-fast',

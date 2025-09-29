@@ -56,7 +56,7 @@ test:
 lint-test:
 	@echo "Linting and testing $(MODULE_NAME)..."
 	$(GO) vet ./... && \
-	$(GOLANGCI_LINT) run --config ../.golangci.yml $(LINT_EXTRA_FLAGS) && \
+	$(GOLANGCI_LINT) run --config $(GOLANGCI_CONFIG_PATH) $(LINT_EXTRA_FLAGS) && \
 	$(MAKE) test && \
 	$(GO) tool cover -func coverage.txt && \
 	$(GOCOVER_COBERTURA) < coverage.txt > coverage.xml

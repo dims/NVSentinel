@@ -42,9 +42,10 @@ include ../common.mk
 # LEGACY COMPATIBILITY
 # =============================================================================
 
-.PHONY: image publish docker-build-with-cache
+# Legacy targets for backwards compatibility
+.PHONY: image publish
 image: docker-build
-publish: docker-publish
+	@echo "Legacy 'image' target - use 'docker-build' for local development"
 
 # Additional target for CI with registry cache
 docker-build-with-cache: setup-buildx
@@ -60,6 +61,9 @@ docker-build-with-cache: setup-buildx
 		-t $(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-$(MODULE_NAME):$(SAFE_REF_NAME) \
 		-f $(DOCKER_MODULE_PATH)/Dockerfile \
 		.
+
+publish: docker-publish
+	@echo "Legacy 'publish' target - use 'docker-publish' for CI/production"
 
 # =============================================================================
 # MODULE HELP

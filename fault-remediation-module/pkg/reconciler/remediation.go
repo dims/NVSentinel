@@ -24,11 +24,10 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/common"
-	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/crstatus"
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/common"
 	batchv1 "k8s.io/api/batch/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -50,14 +49,12 @@ const (
 )
 
 type FaultRemediationClient struct {
-	clientset            dynamic.Interface
-	kubeClient           kubernetes.Interface
-	restMapper           *restmapper.DeferredDiscoveryRESTMapper
-	dryRunMode           []string
-	template             *template.Template
-	templateData         TemplateData
-	annotationManager    NodeAnnotationManagerInterface
-	statusCheckerFactory *crstatus.CRStatusCheckerFactory
+	clientset    dynamic.Interface
+	kubeClient   kubernetes.Interface
+	restMapper   *restmapper.DeferredDiscoveryRESTMapper
+	dryRunMode   []string
+	template     *template.Template
+	templateData TemplateData
 }
 
 // TemplateData holds the data to be inserted into the template
@@ -69,7 +66,7 @@ type TemplateData struct {
 	TemplateMountPath string
 	TemplateFileName  string
 	HealthEventID     string
-	RecommendedAction platformconnector.RecommenedAction
+	RecommendedAction platform_connectors.RecommenedAction
 }
 
 // nolint: cyclop // todo
@@ -144,44 +141,40 @@ func NewK8sClient(kubeconfig string, dryRun bool, templateData TemplateData) (*F
 		client.dryRunMode = []string{}
 	}
 
-	// Initialize annotation manager
-	client.annotationManager = NewNodeAnnotationManager(kubeClient)
-
-	// Initialize status checker factory
-	client.statusCheckerFactory = crstatus.NewCRStatusCheckerFactory(
-		clientset, mapper, dryRun)
-
 	return client, kubeClient, nil
 }
 
-// GetAnnotationManager returns the annotation manager for the client
-func (c *FaultRemediationClient) GetAnnotationManager() NodeAnnotationManagerInterface {
-	return c.annotationManager
-}
+// nolint: cyclop // TODO: Further refactoring needed to reduce complexity
+func (c *FaultRemediationClient) CreateMaintenanceResource(ctx context.Context, healthEventDoc *HealthEventDoc) bool {
+	// Extract the HealthEvent using common utility
+	healthEvent, err := common.ExtractPlatformConnectorHealthEvent(&healthEventDoc.HealthEventWithStatus)
+	if err != nil {
+		return false
+	}
 
-// GetStatusCheckerForAction returns the appropriate status checker for the given action
-func (c *FaultRemediationClient) GetStatusCheckerForAction(
-	action platformconnector.RecommenedAction,
-) (crstatus.CRStatusChecker, error) {
-	return c.statusCheckerFactory.GetStatusChecker(action)
-}
-
-func (c *FaultRemediationClient) CreateMaintenanceResource(
-	ctx context.Context,
-	healthEventDoc *HealthEventDoc,
-) (bool, string) {
-	healthEvent := healthEventDoc.HealthEventWithStatus.HealthEvent
-	healthEventID := healthEventDoc.ID.Hex()
-
-	// Generate CR name
-	crName := fmt.Sprintf("maintenance-%s-%s", healthEvent.NodeName, healthEventID)
+	healthEventID := healthEventDoc.ID
 
 	// Skip custom resource creation if dry-run is enabled
 	if len(c.dryRunMode) > 0 {
 		log.Printf("DRY-RUN: Skipping custom resource creation for node %s", healthEvent.NodeName)
-		return true, crName
+		return true
 	}
 
+	// Generate the maintenance resource from template
+	maintenance, mapping, err := c.generateMaintenanceResource(healthEvent, healthEventID)
+	if err != nil {
+		return false
+	}
+
+	// Create the resource with idempotency
+	return c.createOrVerifyResource(ctx, maintenance, mapping, healthEvent.NodeName)
+}
+
+// generateMaintenanceResource generates the unstructured maintenance resource from template
+func (c *FaultRemediationClient) generateMaintenanceResource(
+	healthEvent *platform_connectors.HealthEvent,
+	healthEventID string,
+) (*unstructured.Unstructured, *meta.RESTMapping, error) {
 	log.Printf("Creating RebootNode CR for node: %s", healthEvent.NodeName)
 	c.templateData.NodeName = healthEvent.NodeName
 	c.templateData.RecommendedAction = healthEvent.RecommendedAction
@@ -191,7 +184,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	var buf bytes.Buffer
 	if err := c.template.Execute(&buf, c.templateData); err != nil {
 		log.Fatalf("Failed to execute template: %v", err)
-		return false, ""
+		return nil, nil, err
 	}
 
 	log.Printf("Generated YAML: %s", buf.String())
@@ -200,7 +193,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	var obj map[string]any
 	if err := yaml.Unmarshal(buf.Bytes(), &obj); err != nil {
 		log.Fatalf("Failed to unmarshal YAML: %v", err)
-		return false, ""
+		return nil, nil, err
 	}
 
 	maintenance := &unstructured.Unstructured{Object: obj}
@@ -212,61 +205,83 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	mapping, err := c.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		log.Fatalf("Failed to get REST mapping for %s: %v", gvk, err)
-		return false, ""
+		return nil, nil, err
 	}
 
-	// Create the maintenance resource at cluster level
-	createdCR, err := c.clientset.Resource(mapping.Resource).
-		Create(ctx, maintenance, metav1.CreateOptions{})
-	if err != nil {
-		return c.handleCreateCRError(ctx, err, crName, healthEvent)
-	}
-
-	// Get the actual name of the created CR
-	actualCRName := createdCR.GetName()
-	log.Printf("Created Maintenance CR %s successfully for node %s", actualCRName, healthEvent.NodeName)
-
-	// Update node annotation with CR reference
-	group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
-	if group != "" && c.annotationManager != nil {
-		if err := c.annotationManager.UpdateRemediationState(ctx, healthEvent.NodeName,
-			group, actualCRName); err != nil {
-			// Continue even if annotation update fails
-			log.Printf("Warning: Failed to update node annotation for %s: %v", healthEvent.NodeName, err)
-		}
-	}
-
-	return true, actualCRName
+	return maintenance, mapping, nil
 }
 
-// handleCreateCRError handles errors from CR creation
-func (c *FaultRemediationClient) handleCreateCRError(
+// createOrVerifyResource creates a new resource or verifies existing one (idempotent)
+func (c *FaultRemediationClient) createOrVerifyResource(
 	ctx context.Context,
-	err error,
-	crName string,
-	healthEvent *platformconnector.HealthEvent,
-) (bool, string) {
-	// Check if the CR already exists
-	if apierrors.IsAlreadyExists(err) {
-		log.Printf("Maintenance CR %s already exists for node %s, treating as success",
-			crName, healthEvent.NodeName)
+	maintenance *unstructured.Unstructured,
+	mapping *meta.RESTMapping,
+	nodeName string,
+) bool {
+	resourceName := maintenance.GetName()
 
-		// Update node annotation with CR reference
-		group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
-		if group != "" && c.annotationManager != nil {
-			if err := c.annotationManager.UpdateRemediationState(ctx, healthEvent.NodeName,
-				group, crName); err != nil {
-				log.Printf("Warning: Failed to update node annotation for %s: %v", healthEvent.NodeName, err)
-			}
-		}
-
-		return true, crName
+	// Check if the resource already exists
+	existing, err := c.clientset.Resource(mapping.Resource).
+		Get(ctx, resourceName, metav1.GetOptions{})
+	if err == nil {
+		return c.verifyExistingResource(existing, resourceName, nodeName)
 	}
 
-	// For other errors, log and return failure (not fatal - allow retry)
-	log.Printf("Failed to create Maintenance CR: %v", err)
+	// If error is not "not found", it's a real error
+	if !errors.IsNotFound(err) {
+		log.Printf("Error checking for existing Maintenance CR %s: %v", resourceName, err)
+		return false
+	}
 
-	return false, ""
+	// Create the maintenance resource (it doesn't exist yet)
+	return c.createResource(ctx, maintenance, mapping, resourceName, nodeName)
+}
+
+// verifyExistingResource verifies an existing resource matches expectations
+func (c *FaultRemediationClient) verifyExistingResource(
+	existing *unstructured.Unstructured,
+	resourceName, nodeName string,
+) bool {
+	log.Printf("Maintenance CR %s already exists for node %s, skipping creation",
+		resourceName, nodeName)
+
+	// Optionally verify the existing CR matches our expectations
+	spec, ok := existing.Object["spec"].(map[string]interface{})
+	if ok {
+		if existingNode := spec["nodeName"]; existingNode != nodeName {
+			log.Printf("WARNING: Existing CR %s has nodeName: %v (expected %s)",
+				resourceName, existingNode, nodeName)
+		}
+	}
+
+	return true
+}
+
+// createResource creates a new maintenance resource
+func (c *FaultRemediationClient) createResource(
+	ctx context.Context,
+	maintenance *unstructured.Unstructured,
+	mapping *meta.RESTMapping,
+	resourceName, nodeName string,
+) bool {
+	_, err := c.clientset.Resource(mapping.Resource).
+		Create(ctx, maintenance, metav1.CreateOptions{})
+	if err != nil {
+		// Check if it's an "already exists" error (race condition)
+		if errors.IsAlreadyExists(err) {
+			log.Printf("Maintenance CR %s was created by another instance", resourceName)
+
+			return true
+		}
+
+		log.Printf("Failed to create Maintenance CR %s: %v", resourceName, err)
+
+		return false
+	}
+
+	log.Printf("Created Maintenance CR %s successfully for node %s", resourceName, nodeName)
+
+	return true
 }
 
 // RunLogCollectorJob creates a log collector Job and waits for completion.
@@ -398,4 +413,19 @@ func (c *FaultRemediationClient) RunLogCollectorJob(ctx context.Context, nodeNam
 		close(stopCh)
 		return result
 	}
+}
+
+// GetNodeStateLabel retrieves the nvsentinel-state label from a node
+func (c *FaultRemediationClient) GetNodeStateLabel(ctx context.Context, nodeName string) (string, error) {
+	node, err := c.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	stateLabel, exists := node.Labels["dgxc.nvidia.com/nvsentinel-state"]
+	if !exists {
+		return "", nil // No state label
+	}
+
+	return stateLabel, nil
 }

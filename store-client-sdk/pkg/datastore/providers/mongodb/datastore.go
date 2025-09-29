@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package datastore
+package mongodb
 
 import (
 	"context"
@@ -24,9 +24,11 @@ import (
 	"time"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	klog "k8s.io/klog/v2"
@@ -61,13 +63,16 @@ type Store interface {
 	FindActiveEventsByStatuses(ctx context.Context, csp model.CSP, statuses []string) ([]model.MaintenanceEvent, error)
 }
 
-// MongoStore implements the Store interface using MongoDB.
+// MongoStore implements the DataStore interface using MongoDB.
 type MongoStore struct {
 	client         *mongo.Collection
 	collectionName string
 }
 
 var _ Store = (*MongoStore)(nil)
+var _ datastore.DataStore = (*MongoStore)(nil)
+var _ datastore.MaintenanceEventStore = (*MongoStore)(nil)
+var _ datastore.HealthEventStore = (*MongoStore)(nil)
 
 // NewStore creates a new MongoDB store client.
 func NewStore(ctx context.Context, mongoClientCertMountPath *string) (*MongoStore, error) {
@@ -96,11 +101,11 @@ func NewStore(ctx context.Context, mongoClientCertMountPath *string) (*MongoStor
 		return nil, fmt.Errorf("mongo client certificate mount path is required")
 	}
 
-	mongoConfig := storewatcher.MongoDBConfig{
+	mongoConfig := MongoDBConfig{
 		URI:        mongoURI,
 		Database:   mongoDatabase,
 		Collection: mongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
+		ClientTLSCertConfig: MongoDBClientTLSCertConfig{
 			TlsCertPath: filepath.Join(*mongoClientCertMountPath, "tls.crt"),
 			TlsKeyPath:  filepath.Join(*mongoClientCertMountPath, "tls.key"),
 			CaCertPath:  filepath.Join(*mongoClientCertMountPath, "ca.crt"),
@@ -116,7 +121,7 @@ func NewStore(ctx context.Context, mongoClientCertMountPath *string) (*MongoStor
 		mongoURI, mongoDatabase, mongoCollection,
 	)
 
-	collection, err := storewatcher.GetCollectionClient(ctx, mongoConfig)
+	collection, err := GetCollectionClient(ctx, mongoConfig)
 	if err != nil {
 		// Consider adding a datastore connection metric error here
 		return nil, fmt.Errorf("error initializing MongoDB collection client: %w", err)
@@ -163,6 +168,52 @@ func NewStore(ctx context.Context, mongoClientCertMountPath *string) (*MongoStor
 		client:         collection,
 		collectionName: mongoCollection,
 	}, nil
+}
+
+// NewChangeStreamWatcher creates a new change stream watcher for the MongoDB datastore
+// This method makes MongoDB compatible with the new datastore abstraction layer
+func (m *MongoStore) NewChangeStreamWatcher(
+	ctx context.Context, config interface{},
+) (datastore.ChangeStreamWatcher, error) {
+	// Convert the generic config to MongoDB-specific config
+	var mongoConfig MongoDBChangeStreamConfig
+
+	// Handle different config types that might be passed
+	switch c := config.(type) {
+	case MongoDBChangeStreamConfig:
+		mongoConfig = c
+	case map[string]interface{}:
+		// Support generic config format
+		if collectionName, ok := c["CollectionName"].(string); ok {
+			mongoConfig.CollectionName = collectionName
+		}
+
+		if clientName, ok := c["ClientName"].(string); ok {
+			mongoConfig.ClientName = clientName
+		}
+
+		// Support custom pipeline for filtering
+		if pipeline, ok := c["Pipeline"]; ok {
+			mongoConfig.Pipeline = pipeline
+		}
+
+		// PollInterval is unused for MongoDB but included for interface compatibility
+		mongoConfig.PollInterval = 5 * time.Second
+	default:
+		return nil, fmt.Errorf("unsupported config type for MongoDB change stream: %T", config)
+	}
+
+	// Validate required fields
+
+	if mongoConfig.CollectionName == "" {
+		mongoConfig.CollectionName = "health_events" // Default collection
+	}
+
+	if mongoConfig.ClientName == "" {
+		return nil, fmt.Errorf("ClientName is required for MongoDB change stream watcher")
+	}
+
+	return m.newMongoChangeStreamWatcher(ctx, mongoConfig)
 }
 
 // getEnvAsInt parses an integer environment variable.
@@ -227,7 +278,7 @@ func (s *MongoStore) UpsertMaintenanceEvent(ctx context.Context, event *model.Ma
 		return fmt.Errorf("invalid event passed to UpsertMaintenanceEvent (nil or empty EventID)")
 	}
 
-	filter := bson.D{{Key: "eventId", Value: event.EventID}}
+	filter := bson.D{bson.E{Key: "eventId", Value: event.EventID}}
 	event.LastUpdatedTimestamp = time.Now().UTC()
 
 	// Since Processor now prepares the event fully, we directly upsert.
@@ -467,8 +518,11 @@ func (s *MongoStore) FindLatestOngoingEventByNode(
 		return nil, false, fmt.Errorf("nodeName is required")
 	}
 
-	filter := bson.D{{Key: "nodeName", Value: nodeName}, {Key: "status", Value: model.StatusMaintenanceOngoing}}
-	opts := options.FindOne().SetSort(bson.D{{Key: "lastUpdatedTimestamp", Value: -1}})
+	filter := bson.D{
+		bson.E{Key: "nodeName", Value: nodeName},
+		bson.E{Key: "status", Value: model.StatusMaintenanceOngoing},
+	}
+	opts := options.FindOne().SetSort(bson.D{bson.E{Key: "lastUpdatedTimestamp", Value: -1}})
 
 	var event model.MaintenanceEvent
 
@@ -521,3 +575,415 @@ func (s *MongoStore) FindActiveEventsByStatuses(
 
 	return results, nil
 }
+
+// Ping checks if the MongoDB connection is alive
+func (s *MongoStore) Ping(ctx context.Context) error {
+	if err := s.client.Database().Client().Ping(ctx, nil); err != nil {
+		return fmt.Errorf("failed to ping MongoDB: %w", err)
+	}
+
+	return nil
+}
+
+// Close closes the MongoDB connection
+func (s *MongoStore) Close(ctx context.Context) error {
+	if s.client != nil {
+		return s.client.Database().Client().Disconnect(ctx)
+	}
+
+	return nil
+}
+
+// MaintenanceEventStore returns the maintenance event store interface
+func (s *MongoStore) MaintenanceEventStore() datastore.MaintenanceEventStore {
+	return s
+}
+
+// HealthEventStore returns the health event store interface
+func (s *MongoStore) HealthEventStore() datastore.HealthEventStore {
+	return s
+}
+
+// InsertHealthEvents inserts health events into MongoDB
+func (s *MongoStore) InsertHealthEvents(ctx context.Context, eventWithStatus *datastore.HealthEventWithStatus) error {
+	if eventWithStatus == nil || eventWithStatus.HealthEvent == nil {
+		return fmt.Errorf("invalid health event (nil)")
+	}
+
+	// Get health events collection (separate from maintenance events)
+	healthEventsCollection := s.client.Database().Collection("HealthEvents")
+
+	// Type assert the HealthEvent to the proper concrete type
+	healthEvent, ok := eventWithStatus.HealthEvent.(*platform_connectors.HealthEvent)
+	if !ok {
+		return fmt.Errorf("expected *platform_connectors.HealthEvent, got %T", eventWithStatus.HealthEvent)
+	}
+
+	// Create a document with both structured fields for indexing and the full document
+	document := bson.M{
+		"nodeName":                 healthEvent.NodeName,
+		"eventType":                healthEvent.CheckName,      // Use CheckName as event type
+		"severity":                 healthEvent.ComponentClass, // Use ComponentClass as severity
+		"recommendedAction":        healthEvent.RecommendedAction.String(),
+		"nodeQuarantined":          eventWithStatus.HealthEventStatus.NodeQuarantined,
+		"userPodsEvictionStatus":   eventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Status,
+		"userPodsEvictionMessage":  eventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Message,
+		"faultRemediated":          eventWithStatus.HealthEventStatus.FaultRemediated,
+		"lastRemediationTimestamp": eventWithStatus.HealthEventStatus.LastRemediationTimestamp,
+		"document":                 eventWithStatus, // Store the full document
+		"createdAt":                eventWithStatus.CreatedAt,
+		"updatedAt":                time.Now().UTC(),
+	}
+
+	_, err := healthEventsCollection.InsertOne(ctx, document)
+	if err != nil {
+		return fmt.Errorf("failed to insert health event for node %s: %w", healthEvent.NodeName, err)
+	}
+
+	klog.V(2).Infof("Successfully inserted health event for node: %s", healthEvent.NodeName)
+
+	return nil
+}
+
+// UpdateHealthEventStatus updates the status of a health event in MongoDB
+func (s *MongoStore) UpdateHealthEventStatus(ctx context.Context, id string, status datastore.HealthEventStatus) error {
+	if id == "" {
+		return fmt.Errorf("health event ID is required")
+	}
+
+	// Convert string ID to ObjectID
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("invalid health event ID format: %w", err)
+	}
+
+	// Get health events collection
+	healthEventsCollection := s.client.Database().Collection("HealthEvents")
+
+	// Build update document - only set non-nil fields to avoid overwriting existing values
+	setFields := bson.M{
+		"userPodsEvictionStatus":     status.UserPodsEvictionStatus.Status,
+		"userPodsEvictionMessage":    status.UserPodsEvictionStatus.Message,
+		"document.healtheventstatus": status, // Update the nested document
+		"updatedAt":                  time.Now().UTC(),
+	}
+
+	// Only set these fields if they are non-nil
+	if status.NodeQuarantined != nil {
+		setFields["nodeQuarantined"] = status.NodeQuarantined
+	}
+
+	if status.FaultRemediated != nil {
+		setFields["faultRemediated"] = status.FaultRemediated
+	}
+
+	if status.LastRemediationTimestamp != nil {
+		setFields["lastRemediationTimestamp"] = status.LastRemediationTimestamp
+	}
+
+	update := bson.M{"$set": setFields}
+
+	result, err := healthEventsCollection.UpdateOne(ctx, bson.M{"_id": objectID}, update)
+	if err != nil {
+		return fmt.Errorf("failed to update health event status for ID %s: %w", id, err)
+	}
+
+	if result.MatchedCount == 0 {
+		klog.Warningf("Attempted to update status for non-existent health event: %s", id)
+	} else {
+		klog.V(2).Infof("Successfully updated health event status for ID: %s", id)
+	}
+
+	return nil
+}
+
+// UpdateHealthEventStatusByNode updates the status of all unremediated health events for a given node.
+// This method is used by node-drainer to update MongoDB after drain completion, which triggers
+// change stream events for fault-remediation to pick up immediately.
+//
+//nolint:cyclop // Function handles multiple validation steps and error cases sequentially
+func (s *MongoStore) UpdateHealthEventStatusByNode(
+	ctx context.Context, nodeName string, status datastore.HealthEventStatus,
+) error {
+	if nodeName == "" {
+		return fmt.Errorf("node name is required")
+	}
+
+	// Get health events collection
+	healthEventsCollection := s.client.Database().Collection("HealthEvents")
+
+	// Find all health events for this node
+	filter := bson.M{
+		"nodeName": nodeName,
+		// Only update unremediated events
+		"$or": []bson.M{
+			{"document.healtheventstatus.faultRemediated": nil},
+			{"document.healtheventstatus.faultRemediated": false},
+		},
+	}
+
+	// Build update document
+	updateDoc := bson.M{
+		"$set": bson.M{
+			"document.healtheventstatus.userPodsEvictionStatus": status.UserPodsEvictionStatus,
+			"updatedAt": time.Now().UTC(),
+		},
+	}
+
+	// Update all matching documents
+	result, err := healthEventsCollection.UpdateMany(ctx, filter, updateDoc)
+	if err != nil {
+		return fmt.Errorf("failed to update health event status for node %s: %w", nodeName, err)
+	}
+
+	if result.MatchedCount == 0 {
+		klog.V(2).Infof("No unremediated health events found for node %s", nodeName)
+	} else {
+		klog.Infof("Successfully updated %d health event(s) for node %s", result.ModifiedCount, nodeName)
+	}
+
+	return nil
+}
+
+// FindHealthEventsByNode finds all health events for a specific node in MongoDB
+func (s *MongoStore) FindHealthEventsByNode(
+	ctx context.Context, nodeName string,
+) ([]datastore.HealthEventWithStatus, error) {
+	if nodeName == "" {
+		return nil, fmt.Errorf("node name is required")
+	}
+
+	// Get health events collection
+	healthEventsCollection := s.client.Database().Collection("HealthEvents")
+
+	// Query for events by node name, sorted by creation time (newest first)
+	filter := bson.M{"nodeName": nodeName}
+	options := options.Find().SetSort(bson.M{"createdAt": -1})
+
+	cursor, err := healthEventsCollection.Find(ctx, filter, options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query health events for node %s: %w", nodeName, err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []datastore.HealthEventWithStatus
+
+	for cursor.Next(ctx) {
+		var doc bson.M
+		if err := cursor.Decode(&doc); err != nil {
+			klog.Warningf("Failed to decode health event: %v", err)
+			continue
+		}
+
+		// Extract the full document
+		if documentRaw, exists := doc["document"]; exists {
+			// Convert to HealthEventWithStatus
+			documentBytes, err := bson.Marshal(documentRaw)
+			if err != nil {
+				klog.Warningf("Failed to marshal health event document: %v", err)
+				continue
+			}
+
+			var event datastore.HealthEventWithStatus
+			if err := bson.Unmarshal(documentBytes, &event); err != nil {
+				klog.Warningf("Failed to unmarshal health event: %v", err)
+				continue
+			}
+
+			results = append(results, event)
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating health events: %w", err)
+	}
+
+	klog.V(2).Infof("Found %d health events for node %s", len(results), nodeName)
+
+	return results, nil
+}
+
+// FindHealthEventsByFilter finds health events based on filter criteria in MongoDB
+func (s *MongoStore) FindHealthEventsByFilter(
+	ctx context.Context, filter map[string]interface{},
+) ([]datastore.HealthEventWithStatus, error) {
+	if len(filter) == 0 {
+		return nil, fmt.Errorf("filter cannot be empty")
+	}
+
+	// Get health events collection
+	healthEventsCollection := s.client.Database().Collection("HealthEvents")
+
+	// Convert filter to MongoDB query
+	mongoFilter := s.convertFilterToMongoQuery(filter)
+
+	// Execute query and return results
+	return s.executeHealthEventsQuery(ctx, healthEventsCollection, mongoFilter)
+}
+
+// FindHealthEventsByStatus finds health events matching a specific status
+// Used for recovery scenarios (e.g., finding in-progress drain operations on restart)
+func (s *MongoStore) FindHealthEventsByStatus(
+	ctx context.Context, status datastore.Status,
+) ([]datastore.HealthEventWithStatus, error) {
+	if status == "" {
+		return nil, fmt.Errorf("status cannot be empty")
+	}
+
+	// Get health events collection
+	healthEventsCollection := s.client.Database().Collection("HealthEvents")
+
+	// Query for events by status
+	// Note: This queries the UserPodsEvictionStatus for node-drainer's use case
+	mongoFilter := bson.M{
+		"healtheventstatus.userpodsevictionstatus.status": string(status),
+	}
+
+	klog.V(2).Infof("Querying health events by status: %s", status)
+
+	// Execute query and return results
+	return s.executeHealthEventsQuery(ctx, healthEventsCollection, mongoFilter)
+}
+
+// convertFilterToMongoQuery converts filter map to MongoDB query format
+func (s *MongoStore) convertFilterToMongoQuery(filter map[string]interface{}) bson.M {
+	mongoFilter := bson.M{}
+
+	for key, value := range filter {
+		if mongoKey := s.getMongoFieldKey(key); mongoKey != "" {
+			mongoFilter[mongoKey] = value
+		} else {
+			// For other fields, query the nested document
+			mongoFilter[fmt.Sprintf("document.%s", key)] = value
+		}
+	}
+
+	return mongoFilter
+}
+
+// getMongoFieldKey maps filter keys to MongoDB field names
+func (s *MongoStore) getMongoFieldKey(key string) string {
+	fieldMappings := map[string]string{
+		"node_name":                 "nodeName",
+		"nodeName":                  "nodeName",
+		"event_type":                "eventType",
+		"eventType":                 "eventType",
+		"severity":                  "severity",
+		"recommended_action":        "recommendedAction",
+		"recommendedAction":         "recommendedAction",
+		"node_quarantined":          "nodeQuarantined",
+		"nodeQuarantined":           "nodeQuarantined",
+		"user_pods_eviction_status": "userPodsEvictionStatus",
+		"userPodsEvictionStatus":    "userPodsEvictionStatus",
+		"fault_remediated":          "faultRemediated",
+		"faultRemediated":           "faultRemediated",
+	}
+
+	return fieldMappings[key]
+}
+
+// executeHealthEventsQuery executes the MongoDB query and processes results
+func (s *MongoStore) executeHealthEventsQuery(
+	ctx context.Context,
+	healthEventsCollection *mongo.Collection,
+	mongoFilter bson.M,
+) ([]datastore.HealthEventWithStatus, error) {
+	// Query with sorting (newest first)
+	options := options.Find().SetSort(bson.M{"createdAt": -1})
+
+	cursor, err := healthEventsCollection.Find(ctx, mongoFilter, options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query health events with filter: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	return s.processHealthEventsCursor(ctx, cursor)
+}
+
+// processHealthEventsCursor processes the MongoDB cursor and extracts health events
+func (s *MongoStore) processHealthEventsCursor(
+	ctx context.Context,
+	cursor *mongo.Cursor,
+) ([]datastore.HealthEventWithStatus, error) {
+	var results []datastore.HealthEventWithStatus
+
+	for cursor.Next(ctx) {
+		event, err := s.decodeHealthEventFromCursor(ctx, cursor)
+		if err != nil {
+			// Log warning and continue with next document
+			klog.Warningf("Failed to decode health event: %v", err)
+			continue
+		}
+
+		if event != nil {
+			results = append(results, *event)
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating health events: %w", err)
+	}
+
+	klog.V(2).Infof("Found %d health events matching filter", len(results))
+
+	return results, nil
+}
+
+// decodeHealthEventFromCursor decodes a single health event from cursor
+func (s *MongoStore) decodeHealthEventFromCursor(
+	ctx context.Context,
+	cursor *mongo.Cursor,
+) (*datastore.HealthEventWithStatus, error) {
+	var doc bson.M
+	if err := cursor.Decode(&doc); err != nil {
+		return nil, err
+	}
+
+	// Extract the full document
+	documentRaw, exists := doc["document"]
+	if !exists {
+		return nil, nil // No document field, skip
+	}
+
+	// Convert to HealthEventWithStatus
+	documentBytes, err := bson.Marshal(documentRaw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal health event document: %w", err)
+	}
+
+	var event datastore.HealthEventWithStatus
+	if err := bson.Unmarshal(documentBytes, &event); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal health event: %w", err)
+	}
+
+	return &event, nil
+}
+
+// InsertMany inserts multiple documents into the default collection
+func (s *MongoStore) InsertMany(ctx context.Context, documents []interface{}) error {
+	if len(documents) == 0 {
+		return nil
+	}
+
+	// Use the default collection for the store
+	collection := s.client.Database().Collection(s.collectionName)
+
+	_, err := collection.InsertMany(ctx, documents)
+	if err != nil {
+		return fmt.Errorf("failed to insert documents: %w", err)
+	}
+
+	klog.V(2).Infof("Successfully inserted %d documents", len(documents))
+
+	return nil
+}
+
+// ExtractDocumentID provides MongoDB-specific document ID extraction
+// This method is called via duck typing by common package utilities (see ExtractDocumentIDFromRawEvent)
+// It keeps MongoDB-specific ObjectID handling in the MongoDB package
+func (s *MongoStore) ExtractDocumentID(rawEvent map[string]interface{}) string {
+	return ExtractRawObjectID(rawEvent)
+}
+
+// Verify that MongoStore implements DataStore interface
+var _ datastore.DataStore = (*MongoStore)(nil)

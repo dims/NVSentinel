@@ -133,10 +133,57 @@ func (ni *NodeInformer) Run(stopCh <-chan struct{}) error {
 
 	klog.Info("NodeInformer cache synced")
 
-	_, err := ni.recalculateCounts()
-	if err != nil {
-		// Log the error but allow the informer to continue running
-		klog.Errorf("Initial count calculation failed: %v", err)
+	// Retry recalculateCounts if it returns 0 nodes (cache might still be populating)
+	// This handles the race between cache sync and cache population
+	maxRetries := 10
+	retryDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		changed, err := ni.recalculateCounts()
+		if err != nil {
+			klog.Errorf("Initial count calculation failed on attempt %d: %v", attempt+1, err)
+
+			if attempt < maxRetries-1 {
+				time.Sleep(retryDelay)
+				retryDelay *= 2 // Exponential backoff
+
+				if retryDelay > 2*time.Second {
+					retryDelay = 2 * time.Second
+				}
+
+				continue
+			}
+
+			break
+		}
+
+		// Check if we got nodes
+		ni.mutex.RLock()
+		totalNodes := ni.totalGpuNodes
+		ni.mutex.RUnlock()
+
+		if totalNodes > 0 {
+			klog.Infof("NodeInformer cache populated: %d GPU nodes found", totalNodes)
+			break
+		}
+
+		if attempt < maxRetries-1 {
+			klog.V(2).Infof("NodeInformer cache still empty after sync, retry %d/%d in %v",
+				attempt+1, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+			retryDelay *= 2 // Exponential backoff
+
+			if retryDelay > 2*time.Second {
+				retryDelay = 2 * time.Second
+			}
+		} else {
+			klog.Fatalf("NodeInformer cache still reports 0 nodes after %d retries and ~%v total wait time. "+
+				"This indicates a critical initialization failure - either cluster has no GPU nodes "+
+				"or NodeInformer cannot populate its cache. Pod will restart.",
+				maxRetries, time.Duration(maxRetries)*retryDelay)
+		}
+
+		_ = changed // Ignore changed status during initial population
 	}
 
 	return nil
@@ -420,6 +467,8 @@ func (ni *NodeInformer) recalculateCounts() (bool, error) {
 		return false, fmt.Errorf("failed to list nodes from informer cache: %w", err)
 	}
 
+	klog.V(3).Infof("NodeInformer lister returned %d nodes from cache", len(nodes))
+
 	total := 0
 	unschedulable := 0
 
@@ -444,9 +493,12 @@ func (ni *NodeInformer) recalculateCounts() (bool, error) {
 	ni.totalGpuNodes = total
 	ni.mutex.Unlock()
 
-	if changed {
-		klog.V(2).Infof("Node counts updated: Total GPU Nodes=%d, Unschedulable GPU Nodes=%d", total, unschedulable)
-	} else {
+	switch {
+	case total == 0:
+		klog.Warningf("Node counts recalculated: Total GPU Nodes=0 (informer cache may still be populating)")
+	case changed:
+		klog.Infof("Node counts updated: Total GPU Nodes=%d, Unschedulable GPU Nodes=%d", total, unschedulable)
+	default:
 		klog.V(4).Infof("Node counts recalculated, no change: Total GPU Nodes=%d, Unschedulable GPU Nodes=%d",
 			total, unschedulable)
 	}

@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -32,18 +33,18 @@ import (
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp"
 	awsclient "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp/aws"
 	gcpclient "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp/gcp"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers/mongodb"
 )
 
 const (
-	defaultConfigPath    = "/etc/config/config.toml"
-	defaultMongoCertPath = "/etc/ssl/mongo-client"
-	defaultKubeconfig    = ""
-	defaultMetricsPort   = "2112"
-	eventChannelSize     = 100
+	defaultConfigPath  = "/etc/config/config.toml"
+	defaultKubeconfig  = ""
+	defaultMetricsPort = "2112"
+	eventChannelSize   = 100
 )
 
 // startActiveMonitorAndLog starts the provided CSP monitor in a new goroutine
@@ -90,11 +91,6 @@ func main() {
 		defaultKubeconfig,
 		"Path to a kubeconfig file. Only required if running out-of-cluster.",
 	)
-	mongoClientCertMountPath := flag.String(
-		"mongo-client-cert-mount-path",
-		defaultMongoCertPath,
-		"Directory where MongoDB client tls.crt, tls.key, and ca.crt are mounted.",
-	)
 
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -112,12 +108,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := datastore.NewStore(ctx, mongoClientCertMountPath)
+	// Load datastore configuration based on environment variables
+	datastoreConfig, err := loadDatastoreConfig()
+	if err != nil {
+		klog.Fatalf("Failed to load datastore configuration: %v", err)
+	}
+
+	store, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
 		klog.Fatalf("Failed to initialize datastore: %v", err)
 	}
 
-	klog.Info("Datastore initialized successfully.")
+	klog.Infof("Successfully connected to datastore provider: %s", datastoreConfig.Provider)
 
 	eventChan := make(chan model.MaintenanceEvent, eventChannelSize)
 	// Processor is lightweight; it already encapsulates required dependencies.
@@ -161,13 +163,56 @@ func main() {
 	klog.Info("CSP Health Monitor (Main Container) shut down completed.")
 }
 
+// loadDatastoreConfig loads datastore configuration from environment variables
+func loadDatastoreConfig() (*datastore.DataStoreConfig, error) {
+	config := &datastore.DataStoreConfig{}
+
+	// Get provider from environment variable (defaults to MongoDB for backward compatibility)
+	providerStr := os.Getenv("DATASTORE_PROVIDER")
+	if providerStr == "" {
+		klog.Infof("DATASTORE_PROVIDER not set, defaulting to MongoDB for backward compatibility")
+
+		config.Provider = datastore.ProviderMongoDB
+	} else {
+		config.Provider = datastore.DataStoreProvider(providerStr)
+	}
+
+	// Load connection configuration based on provider
+	switch config.Provider {
+	case datastore.ProviderMongoDB:
+		config.Connection = datastore.ConnectionConfig{
+			Host:     os.Getenv("MONGODB_URI"), // MongoDB uses URI format
+			Database: getEnvWithDefault("MONGODB_DATABASE_NAME", "nvsentinel"),
+		}
+		if config.Connection.Host == "" {
+			return nil, fmt.Errorf("MONGODB_URI environment variable is required for MongoDB provider")
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported datastore provider: %s", config.Provider)
+	}
+
+	klog.Infof("Loaded datastore configuration for provider: %s", config.Provider)
+
+	return config, nil
+}
+
+// getEnvWithDefault returns environment variable value or default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+
+	return defaultValue
+}
+
 // initActiveMonitor instantiates the appropriate CSP monitor (GCP/AWS) based on
 // the supplied configuration. It returns nil when no CSP is enabled.
 func initActiveMonitor(
 	ctx context.Context,
 	cfg *config.Config,
 	kubeconfigPath string,
-	store datastore.Store,
+	store datastore.DataStore,
 ) csp.Monitor {
 	if cfg.GCP.Enabled {
 		klog.Info("GCP configuration is enabled.")

@@ -21,17 +21,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers" // Register all datastore providers
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 	"k8s.io/klog/v2"
 )
 
@@ -42,9 +41,6 @@ func main() {
 	defer stop() // Ensure the signal listener is cleaned up
 
 	var metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
-
-	var mongoClientCertMountPath = flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
 
 	var kubeconfigPath = flag.String("kubeconfig-path", "", "path to kubeconfig file")
 
@@ -70,81 +66,44 @@ func main() {
 		klog.Fatalf("POD_NAMESPACE is not provided")
 	}
 
-	mongoURI := os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		klog.Fatalf("MongoDB URI is not provided")
-	}
-
-	mongoDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if mongoDatabase == "" {
-		klog.Fatalf("MongoDB Database name is not provided")
-	}
-
-	mongoCollection := os.Getenv("MONGODB_COLLECTION_NAME")
-	if mongoCollection == "" {
-		klog.Fatalf("MongoDB collection name is not provided")
-	}
-
-	tokenDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		klog.Fatalf("MongoDB token database name is not provided")
-	}
-
-	tokenCollection := os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		klog.Fatalf("MongoDB token collection name is not provided")
-	}
-
-	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
+	// Load datastore configuration
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		klog.Fatalf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %v", err)
+		klog.Fatalf("Failed to load datastore configuration: %v", err)
 	}
 
-	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
-		klog.Fatalf("invalid MONGODB_PING_INTERVAL_SECONDS: %v", err)
+		klog.Fatalf("Failed to create datastore: %v", err)
 	}
 
-	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		klog.Fatalf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %v", err)
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			klog.Errorf("Failed to close datastore: %v", err)
+		}
+	}()
+
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		klog.Fatalf("Failed to ping datastore: %v", err)
 	}
 
-	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		klog.Fatalf("invalid CA_CERT_READ_INTERVAL_SECONDS: %v", err)
+	klog.Infof("Successfully connected to datastore provider: %s", datastoreConfig.Provider)
+
+	// Start metrics server
+	klog.Infof("Starting a metrics port on : %s", *metricsPort)
+
+	metricsServer := func() {
+		http.Handle("/metrics", promhttp.Handler())
+		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
+		err := http.ListenAndServe(":"+*metricsPort, nil)
+		if err != nil {
+			klog.Fatalf("Failed to start metrics server: %v", err)
+		}
 	}
 
-	unprocessedEventsMetricUpdateIntervalSeconds, err :=
-		getEnvAsInt("UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS", 25)
-	if err != nil {
-		klog.Fatalf("invalid UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: %v", err)
-	}
-
-	mongoConfig := storewatcher.MongoDBConfig{
-		URI:        mongoURI,
-		Database:   mongoDatabase,
-		Collection: mongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(*mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(*mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(*mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    totalTimeoutSeconds,
-		TotalPingIntervalSeconds:   intervalSeconds,
-		TotalCACertTimeoutSeconds:  totalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: intervalCACertSeconds,
-	}
-
-	tokenConfig := storewatcher.TokenConfig{
-		ClientName:      "fault-quarantine-module",
-		TokenDatabase:   tokenDatabase,
-		TokenCollection: tokenCollection,
-	}
-
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.D{{Key: "operationType", Value: bson.D{{Key: "$in", Value: bson.A{"insert"}}}}}}},
-	}
+	go metricsServer()
 
 	tomlCfg, err := config.LoadTomlConfig("/etc/config/config.toml")
 	if err != nil {
@@ -161,18 +120,27 @@ func main() {
 		klog.Fatalf("error while initializing kubernetes client: %v", err)
 	}
 
-	klog.Info("Successfully initialized k8sclient")
+	klog.Info("Successfully initialized k8sclient - using datastore abstraction")
 
+	// Get unprocessed events metric update interval from environment
+	unprocessedEventsMetricUpdateIntervalSeconds, err := getEnvAsInt(
+		"UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS", 30)
+	if err != nil {
+		klog.Fatalf("error while getting unprocessed events metric update interval: %v", err)
+	}
+
+	// Create pipeline for filtering unremediated events (module's business logic)
+	pipeline := createUnremediatedEventsPipeline()
+
+	// Create reconciler configuration
 	reconcilerCfg := reconciler.ReconcilerConfig{
-		TomlConfig:                       *tomlCfg,
-		MongoHealthEventCollectionConfig: mongoConfig,
-		TokenConfig:                      tokenConfig,
-		MongoPipeline:                    pipeline,
-		K8sClient:                        k8sClient,
-		DryRun:                           *dryRun,
-		CircuitBreakerEnabled:            *circuitBreakerEnabled,
-		UnprocessedEventsMetricUpdateInterval: time.Duration(unprocessedEventsMetricUpdateIntervalSeconds) *
-			time.Second,
+		TomlConfig:                            *tomlCfg,
+		DataStore:                             dataStore,
+		Pipeline:                              pipeline, // Module passes its filtering logic explicitly
+		K8sClient:                             k8sClient,
+		DryRun:                                *dryRun,
+		CircuitBreakerEnabled:                 *circuitBreakerEnabled,
+		UnprocessedEventsMetricUpdateInterval: time.Duration(unprocessedEventsMetricUpdateIntervalSeconds) * time.Second,
 		CircuitBreaker: reconciler.CircuitBreakerConfig{
 			Namespace:  namespace,
 			Name:       "fault-quarantine-circuit-breaker",
@@ -185,18 +153,23 @@ func main() {
 	workSignal := make(chan struct{}, 1) // Buffer size 1 is usually sufficient
 
 	// Pass the workSignal channel to the Reconciler
-	reconciler := reconciler.NewReconciler(ctx, reconcilerCfg, workSignal)
+	rec := reconciler.NewReconciler(ctx, reconcilerCfg, workSignal)
+	rec.Start(ctx)
+}
 
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
-		err := http.ListenAndServe(":"+*metricsPort, nil)
-		if err != nil {
-			klog.Fatalf("Failed to start metrics server: %v", err)
-		}
-	}()
-
-	reconciler.Start(ctx)
+// createUnremediatedEventsPipeline creates a database-agnostic aggregation pipeline that filters
+// change stream events to only include INSERT operations.
+// This matches the main branch behavior where only inserts are processed.
+func createUnremediatedEventsPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", map[string]interface{}{
+				"operationType": map[string]interface{}{
+					"$in": []interface{}{"insert"},
+				},
+			}),
+		),
+	}
 }
 
 func getEnvAsInt(name string, defaultValue int) (int, error) {

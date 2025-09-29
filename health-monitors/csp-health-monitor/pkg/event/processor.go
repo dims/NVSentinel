@@ -20,7 +20,7 @@ import (
 	"sync"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
@@ -30,14 +30,14 @@ import (
 // Processor persists normalized maintenance events to the backing datastore.
 // Any CSP-specific node-mapping must already have been resolved by the caller.
 type Processor struct {
-	store  datastore.Store
+	store  datastore.DataStore
 	config *config.Config
 	mu     sync.Mutex
 }
 
 // NewProcessor returns an initialised Processor. k8sMapper parameter is
 // removed.
-func NewProcessor(cfg *config.Config, store datastore.Store) *Processor {
+func NewProcessor(cfg *config.Config, store datastore.DataStore) *Processor {
 	if cfg == nil || store == nil {
 		klog.Fatalf("Cannot create Event Processor with nil dependencies (config or store)")
 		return nil // Should not be reached
@@ -110,7 +110,7 @@ func (p *Processor) inheritState(ctx context.Context, event *model.MaintenanceEv
 //
 //nolint:cyclop
 func (p *Processor) inheritPendingToOngoing(ctx context.Context, event *model.MaintenanceEvent) {
-	prior, found, err := p.store.FindLatestActiveEventByNodeAndType(
+	prior, found, err := p.store.MaintenanceEventStore().FindLatestActiveEventByNodeAndType(
 		ctx, event.NodeName, event.MaintenanceType, []model.InternalStatus{model.StatusDetected})
 	if err != nil {
 		klog.Warningf("Error finding prior PENDING for event %s: %v", event.EventID, err)
@@ -153,7 +153,7 @@ func (p *Processor) inheritOngoingToCompleted(ctx context.Context, event *model.
 		event.NodeName,
 	)
 
-	priorEvent, found, err := p.store.FindLatestOngoingEventByNode(ctx, event.NodeName)
+	priorEvent, found, err := p.store.MaintenanceEventStore().FindLatestOngoingEventByNode(ctx, event.NodeName)
 	if err != nil {
 		klog.Warningf(
 			"[inheritOngoingToCompleted] Error finding prior ONGOING event for COMPLETED event %s "+
@@ -271,7 +271,7 @@ func (p *Processor) ProcessEvent(ctx context.Context, event *model.MaintenanceEv
 
 	metrics.MainDatastoreUpsertAttempts.WithLabelValues(string(event.CSP)).Inc()
 
-	if err := p.store.UpsertMaintenanceEvent(ctx, event); err != nil {
+	if err := p.store.MaintenanceEventStore().UpsertMaintenanceEvent(ctx, event); err != nil {
 		metrics.MainDatastoreUpsertErrors.WithLabelValues(string(event.CSP)).Inc()
 		metrics.MainProcessingErrors.WithLabelValues(string(event.CSP), "datastore_upsert").Inc()
 		klog.Errorf("Failed to upsert event %s: %v", event.EventID, err)

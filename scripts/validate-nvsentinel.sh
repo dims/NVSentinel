@@ -23,8 +23,8 @@ VERSION=""
 VERBOSE=false
 
 usage() {
-    echo "Usage: $0 --version VERSION [--namespace NAMESPACE] [--verbose]"
-    echo "  --version   Required. Expected image version (e.g., v0.0.3)"
+    echo "Usage: $0 [--version VERSION] [--namespace NAMESPACE] [--verbose]"
+    echo "  --version   Optional. Expected image version (e.g., v0.0.3). Defaults to tilt-* pattern if not provided"
     echo "  --namespace Optional. Kubernetes namespace (default: nvsentinel)"
     echo "  --verbose   Optional. Print detailed image lists"
     exit 1
@@ -40,9 +40,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate required parameters
-[[ -z "$VERSION" ]] && { echo "Error: --version is required"; usage; }
+# Set defaults
 NAMESPACE="${NAMESPACE:-nvsentinel}"
+VERSION="${VERSION:-tilt-}"
 
 ERRORS=0
 
@@ -78,12 +78,30 @@ ok "cluster has $total_nodes total nodes ($gpu_nodes GPU nodes, $kwok_nodes KWOK
 
 # Image versions
 echo "=== Image Versions ==="
-# shellcheck disable=SC2126  # wc -l is clearer than grep -c for pipeline
-wrong_versions=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].spec.containers[*].image}' 2>/dev/null | \
-    tr ' ' '\n' | grep "ghcr.io/nvidia/nvsentinel" | grep -v ":$VERSION" | wc -l 2>/dev/null || echo "0")
-wrong_versions=$(echo "$wrong_versions" | tr -d '\n' | tr -d ' ')
-# shellcheck disable=SC2015  # && || pattern is intentional for conditional execution
-[[ "$wrong_versions" -eq 0 ]] && ok "all nvsentinel images use $VERSION" || error "$wrong_versions pods use wrong image version"
+# Get all nvsentinel images (both production ghcr.io and Tilt localhost patterns)
+nvsentinel_images=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].spec.containers[*].image}' 2>/dev/null | \
+    tr ' ' '\n' | grep -E "(ghcr\.io/nvidia/nvsentinel|localhost.*ghcr\.io_nvidia_nvsentinel)" || echo "")
+
+if [[ -n "$nvsentinel_images" ]]; then
+    # Check if VERSION looks like a pattern (starts with tilt- and no specific version)
+    if [[ "$VERSION" == "tilt-" ]]; then
+        # Use tilt- as a regex pattern
+        # shellcheck disable=SC2126  # wc -l is clearer than grep -c for pipeline
+        wrong_versions=$(echo "$nvsentinel_images" | grep -v ":tilt-" | wc -l 2>/dev/null || echo "0")
+        wrong_versions=$(echo "$wrong_versions" | tr -d '\n' | tr -d ' ')
+        # shellcheck disable=SC2015  # && || pattern is intentional for conditional execution
+        [[ "$wrong_versions" -eq 0 ]] && ok "all nvsentinel images use tilt-* pattern" || error "$wrong_versions pods don't use tilt-* pattern"
+    else
+        # Use exact version match
+        # shellcheck disable=SC2126  # wc -l is clearer than grep -c for pipeline
+        wrong_versions=$(echo "$nvsentinel_images" | grep -v ":$VERSION" | wc -l 2>/dev/null || echo "0")
+        wrong_versions=$(echo "$wrong_versions" | tr -d '\n' | tr -d ' ')
+        # shellcheck disable=SC2015  # && || pattern is intentional for conditional execution
+        [[ "$wrong_versions" -eq 0 ]] && ok "all nvsentinel images use $VERSION" || error "$wrong_versions pods use wrong image version"
+    fi
+else
+    warn "no nvsentinel images found in namespace $NAMESPACE"
+fi
 
 # Count images by registry across cluster
 all_images=$( (kubectl get deployments,daemonsets,statefulsets,jobs,cronjobs,replicasets --all-namespaces -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{range .spec.template.spec.initContainers[*]}{.image}{"\n"}{end}{end}' 2>/dev/null; kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}') | sort -u )

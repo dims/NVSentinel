@@ -417,7 +417,11 @@ clean-main-modules:
 	@echo "Cleaning non-health-monitor Go modules..."
 	@for module in $(shell echo "$(GO_MODULES)" | tr ' ' '\n' | grep -v health-monitors); do \
 		echo "Cleaning $$module..."; \
-		$(MAKE) -C $$module clean || exit 1; \
+		if [ -f $$module/Makefile ]; then \
+			$(MAKE) -C $$module clean; \
+		else \
+			cd $$module && $(GO) clean ./... && cd ..; \
+		fi; \
 	done
 
 # Docker targets (delegate to docker/Makefile) - standardized build system
@@ -584,9 +588,9 @@ help:
 	@echo "  kubernetes-distro-lint        - Lint Kubernetes Helm charts"
 	@echo ""
 	@echo "Development environment targets (delegated to dev/Makefile):"
-	@echo "  dev-env                - Create cluster and start Tilt (full setup)"
+	@echo "  dev-env                - Create cluster and start Tilt with MongoDB (full setup)"
 	@echo "  dev-env-clean          - Stop Tilt and delete cluster (full cleanup)"
-	@echo "  tilt-up                - Start Tilt development environment"
+	@echo "  tilt-up                - Start Tilt development environment (MongoDB)"
 	@echo "  tilt-down              - Stop Tilt development environment"
 	@echo "  tilt-ci                - Run Tilt in CI mode (no UI)"
 	@echo "  cluster-create         - Create local ctlptl-managed Kind cluster with registry"

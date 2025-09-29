@@ -17,17 +17,31 @@ global:
     tag: "main"
 
   metricsPort: 2112
-  
+
+  # Minimal datastore configuration (code has sensible defaults, environment-specific values files provide details)
+  datastore:
+    provider: "mongodb"  # Default to MongoDB for backward compatibility
+    connection:
+      host: "mongodb-service"  # Default MongoDB service name
+      port: 27017
+      database: "nvsentinel"
+      # Optional fields (can be overridden in environment-specific values files):
+      # username: ""
+      # sslmode: ""
+      # sslcert: ""
+      # sslkey: ""
+      # sslrootcert: ""
+
   nodeSelector: {}
-  
+
   tolerations: []
-  
+
   affinity: {}
-  
+
   podAnnotations: {}
-  
+
   systemNodeSelector: {}
-  
+
   systemNodeTolerations: []
 
   dcgm:
@@ -88,7 +102,7 @@ global:
       pullPolicy: IfNotPresent
 
   syslogHealthMonitor:
-    enabled: true
+    enabled: false
 
     image:
       repository: ghcr.io/nvidia/nvsentinel-syslog-health-monitor
@@ -145,6 +159,10 @@ platformConnector:
       drop:
       - ALL
 
+  metricsPort: 2112
+
+  # Log verbosity level (0-4): 0=errors, 1=warnings, 2=info, 3=debug, 4=trace
+  logVerbosity: 2
   mongodbStore:
     enabled: false
     clientCertMountPath: "/etc/ssl/mongo-client"

@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -32,24 +33,23 @@ import (
 	klog "k8s.io/klog/v2"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	trigger "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/triggerengine"
 	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers/mongodb"
 )
 
 const (
-	defaultConfigPathSidecar    = "/etc/config/config.toml"
-	defaultMongoCertPathSidecar = "/etc/ssl/mongo-client"
-	defaultUdsPathSidecar       = "/run/nvsentinel/nvsentinel.sock"
-	defaultMetricsPortSidecar   = "2113"
+	defaultConfigPathSidecar  = "/etc/config/config.toml"
+	defaultUdsPathSidecar     = "/run/nvsentinel/nvsentinel.sock"
+	defaultMetricsPortSidecar = "2113"
 )
 
 type appConfig struct {
-	configPath               string
-	udsPath                  string
-	mongoClientCertMountPath string
-	metricsPort              string
+	configPath  string
+	udsPath     string
+	metricsPort string
 }
 
 func parseFlags() *appConfig {
@@ -57,11 +57,6 @@ func parseFlags() *appConfig {
 	// Command-line flags
 	flag.StringVar(&cfg.configPath, "config", defaultConfigPathSidecar, "Path to the TOML configuration file.")
 	flag.StringVar(&cfg.udsPath, "uds-path", defaultUdsPathSidecar, "Path to the Platform Connector UDS socket.")
-	flag.StringVar(&cfg.mongoClientCertMountPath,
-		"mongo-client-cert-mount-path",
-		defaultMongoCertPathSidecar,
-		"Directory where MongoDB client tls.crt, tls.key, and ca.crt are mounted.",
-	)
 	flag.StringVar(&cfg.metricsPort, "metrics-port", defaultMetricsPortSidecar, "Port for the sidecar Prometheus metrics.")
 
 	// Initialise klog and parse flags
@@ -77,7 +72,6 @@ func logStartupInfo(cfg *appConfig) {
 	klog.Infof("Starting Quarantine Trigger Engine Sidecar...")
 	klog.Infof("Using configuration file: %s", cfg.configPath)
 	klog.Infof("Platform Connector UDS Path: %s", cfg.udsPath)
-	klog.Infof("MongoDB Client Cert Mount Path: %s", cfg.mongoClientCertMountPath)
 	klog.Infof("Exposing sidecar metrics on port: %s", cfg.metricsPort)
 	klog.V(2).Infof("Klog verbosity level is set based on the -v flag for sidecar.")
 }
@@ -165,12 +159,18 @@ func main() {
 
 	startMetricsServer(appCfg.metricsPort)
 
-	store, err := datastore.NewStore(ctx, &appCfg.mongoClientCertMountPath)
+	// Load datastore configuration based on environment variables
+	datastoreConfig, err := loadDatastoreConfig()
+	if err != nil {
+		klog.Fatalf("Failed to load datastore configuration: %v", err)
+	}
+
+	store, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
 		klog.Fatalf("Failed to initialize datastore for sidecar: %v", err)
 	}
 
-	klog.Info("Datastore initialized successfully for sidecar.")
+	klog.Infof("Successfully connected to datastore provider: %s (sidecar)", datastoreConfig.Provider)
 
 	conn, platformConnectorClient := setupUDSConnection(appCfg.udsPath)
 	defer func() {
@@ -189,4 +189,47 @@ func main() {
 	engine.Start(ctx) // This is blocking
 
 	klog.Info("Quarantine Trigger Engine Sidecar shut down.")
+}
+
+// loadDatastoreConfig loads datastore configuration from environment variables (same as main.go)
+func loadDatastoreConfig() (*datastore.DataStoreConfig, error) {
+	config := &datastore.DataStoreConfig{}
+
+	// Get provider from environment variable (defaults to MongoDB for backward compatibility)
+	providerStr := os.Getenv("DATASTORE_PROVIDER")
+	if providerStr == "" {
+		klog.Infof("DATASTORE_PROVIDER not set, defaulting to MongoDB for backward compatibility")
+
+		config.Provider = datastore.ProviderMongoDB
+	} else {
+		config.Provider = datastore.DataStoreProvider(providerStr)
+	}
+
+	// Load connection configuration based on provider
+	switch config.Provider {
+	case datastore.ProviderMongoDB:
+		config.Connection = datastore.ConnectionConfig{
+			Host:     os.Getenv("MONGODB_URI"), // MongoDB uses URI format
+			Database: getEnvWithDefault("MONGODB_DATABASE_NAME", "nvsentinel"),
+		}
+		if config.Connection.Host == "" {
+			return nil, fmt.Errorf("MONGODB_URI environment variable is required for MongoDB provider")
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported datastore provider: %s", config.Provider)
+	}
+
+	klog.Infof("Loaded datastore configuration for provider: %s", config.Provider)
+
+	return config, nil
+}
+
+// getEnvWithDefault returns environment variable value or default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+
+	return defaultValue
 }

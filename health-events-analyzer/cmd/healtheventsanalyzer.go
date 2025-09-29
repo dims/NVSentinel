@@ -17,20 +17,22 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/reconciler"
 	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+
+	// Datastore abstraction
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+
+	// Import all providers to ensure registration
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/klog"
@@ -44,90 +46,39 @@ func main() {
 
 	var socket = flag.String("socket", "unix:///var/run/nvsentinel.sock", "unix domain socket")
 
-	var mongoClientCertMountPath = flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
-
 	// Initialize klog flags to allow command-line control (e.g., -v=3)
 	klog.InitFlags(nil)
 
 	defer klog.Flush()
 	flag.Parse()
 
-	mongoURI := os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		klog.Fatalf("MongoDB URI is not provided")
-	}
-
-	mongoDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if mongoDatabase == "" {
-		klog.Fatalf("MongoDB Database name is not provided")
-	}
-
-	mongoCollection := os.Getenv("MONGODB_COLLECTION_NAME")
-	if mongoCollection == "" {
-		klog.Fatalf("MongoDB collection name is not provided")
-	}
-
-	tokenDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		klog.Fatalf("MongoDB token database name is not provided")
-	}
-
-	tokenCollection := os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		klog.Fatalf("MongoDB token collection name is not provided")
-	}
-
-	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
+	// Load datastore configuration using the abstraction layer
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		klog.Fatalf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %v", err)
+		klog.Fatalf("Failed to load datastore configuration: %v", err)
 	}
 
-	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
-		klog.Fatalf("invalid MONGODB_PING_INTERVAL_SECONDS: %v", err)
+		klog.Fatalf("Failed to create datastore: %v", err)
 	}
 
-	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		klog.Fatalf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %v", err)
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			klog.Errorf("Failed to close datastore: %v", err)
+		}
+	}()
+
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		klog.Fatalf("Failed to ping datastore: %v", err)
 	}
 
-	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		klog.Fatalf("invalid CA_CERT_READ_INTERVAL_SECONDS: %v", err)
-	}
+	klog.Infof("Successfully connected to datastore provider: %s", datastoreConfig.Provider)
 
-	mongoConfig := storewatcher.MongoDBConfig{
-		URI:        mongoURI,
-		Database:   mongoDatabase,
-		Collection: mongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(*mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(*mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(*mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    totalTimeoutSeconds,
-		TotalPingIntervalSeconds:   intervalSeconds,
-		TotalCACertTimeoutSeconds:  totalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: intervalCACertSeconds,
-	}
-
-	tokenConfig := storewatcher.TokenConfig{
-		ClientName:      "health-events-analyzer",
-		TokenDatabase:   tokenDatabase,
-		TokenCollection: tokenCollection,
-	}
-
-	pipeline := mongo.Pipeline{
-		bson.D{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: "insert"},
-				{Key: "fullDocument.healthevent.isfatal", Value: false},
-				{Key: "fullDocument.healthevent.ishealthy", Value: false},
-			}},
-		},
-	}
+	// Get collection name from environment (with defaults)
+	collection := getEnvWithDefault("MONGODB_COLLECTION_NAME", "HealthEvents")
 
 	var opts []grpc.DialOption
 	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -147,12 +98,15 @@ func main() {
 		klog.Fatalf("Failed to load config file: %v", err)
 	}
 
+	// Create pipeline to watch for INSERT events of non-fatal unhealthy events
+	pipeline := createHealthEventsAnalyzerPipeline()
+
 	reconcilerCfg := reconciler.HealthEventsAnalyzerReconcilerConfig{
-		MongoHealthEventCollectionConfig: mongoConfig,
-		TokenConfig:                      tokenConfig,
-		MongoPipeline:                    pipeline,
-		HealthEventsAnalyzerRules:        tomlConfig,
-		Publisher:                        publisher,
+		HealthEventsAnalyzerRules: tomlConfig,
+		Publisher:                 publisher,
+		DataStore:                 dataStore,
+		CollectionName:            collection,
+		Pipeline:                  pipeline,
 	}
 
 	reconciler := reconciler.NewReconciler(reconcilerCfg)
@@ -169,20 +123,27 @@ func main() {
 	reconciler.Start(ctx)
 }
 
-func getEnvAsInt(name string, defaultValue int) (int, error) {
-	valueStr, exists := os.LookupEnv(name)
-	if !exists {
-		return defaultValue, nil
+// createHealthEventsAnalyzerPipeline creates a database-agnostic aggregation pipeline that filters
+// change stream events to only include INSERT operations of non-fatal, unhealthy events.
+// Note: InsertHealthEvents stores the eventWithStatus under "document" key
+// See store-client-sdk/pkg/datastore/providers/mongodb/datastore.go:633
+func createHealthEventsAnalyzerPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "insert"),
+				datastore.E("fullDocument.document.healthevent.isfatal", false),
+				datastore.E("fullDocument.document.healthevent.ishealthy", false),
+			)),
+		),
+	}
+}
+
+// getEnvWithDefault returns the environment variable value or a default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return 0, fmt.Errorf("error converting %s to integer: %w", name, err)
-	}
-
-	if value <= 0 {
-		return 0, fmt.Errorf("value of %s must be a positive integer", name)
-	}
-
-	return value, nil
+	return defaultValue
 }

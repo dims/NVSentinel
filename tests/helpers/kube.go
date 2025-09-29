@@ -109,14 +109,20 @@ func DeleteNamespace(ctx context.Context, t *testing.T, c klient.Client, name st
 
 /*
 This function ensures that the given node follows the given label values in order for the dgxc.nvidia.com/nvsentinel-state
-node label. We leverage this helper function to ensure that a node progresses through the following NVSentinel states:
+node label. We leverage this helper function to verify that a node progresses through the following NVSentinel states:
 
 - dgxc.nvidia.com/nvsentinel-state: quarantined
 - dgxc.nvidia.com/nvsentinel-state: draining
-- dgxc.nvidia.com/nvsentinel-state: drain-succeeded
+- dgxc.nvidia.com/nvsentinel-state: drain-succeeded (or drain-failed)
 - dgxc.nvidia.com/nvsentinel-state: remediating
-- dgxc.nvidia.com/nvsentinel-state: remediation-succeeded
+- dgxc.nvidia.com/nvsentinel-state: remediation-succeeded (or remediation-failed)
 - label removed
+
+This state progression is now enforced at the module level:
+- StateManager validates all state transitions and rejects invalid progressions
+- Node drainer validates that draining can only occur after quarantined
+- Fault remediation validates that remediating can only occur after drain completion
+Controllers retry with exponential backoff when prerequisite states are not yet reached.
 
 TODO: this test currently tolerates starting the watch when the node has a label value that does not start with our
 intended sequence rather than starting without the label value. This is required because there's a race condition

@@ -21,409 +21,243 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/common"
-	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/crstatus"
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"github.com/nvidia/nvsentinel/statemanager"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/common"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/watcher"
 	"k8s.io/klog"
 )
 
+const (
+	maxRetries = 5
+	retryDelay = 10 * time.Second
+)
+
 type ReconcilerConfig struct {
-	MongoConfig        storewatcher.MongoDBConfig
-	TokenConfig        storewatcher.TokenConfig
-	MongoPipeline      mongo.Pipeline
-	RemediationClient  FaultRemediationClientInterface
+	DataStore          datastore.DataStore
+	Pipeline           interface{} // Custom pipeline for change stream filtering (e.g., mongo.Pipeline)
+	K8sClient          FaultRemediationClientInterface
 	StateManager       statemanager.StateManager
 	EnableLogCollector bool
-	UpdateMaxRetries   int
-	UpdateRetryDelay   time.Duration
 }
 
 type Reconciler struct {
 	Config              ReconcilerConfig
 	NodeEvictionContext sync.Map
 	DryRun              bool
-	annotationManager   NodeAnnotationManagerInterface
-	remediationClient   FaultRemediationClientInterface
 }
 
 type HealthEventDoc struct {
-	ID                                   primitive.ObjectID `bson:"_id"`
-	storeconnector.HealthEventWithStatus `bson:",inline"`
+	ID string `json:"id,omitempty"`
+	datastore.HealthEventWithStatus
 }
 
 func NewReconciler(cfg ReconcilerConfig, dryRunEnabled bool) *Reconciler {
-	return &Reconciler{
-		Config:              cfg,
-		NodeEvictionContext: sync.Map{},
-		DryRun:              dryRunEnabled,
-		remediationClient:   cfg.RemediationClient,
-		annotationManager:   cfg.RemediationClient.GetAnnotationManager(),
+	return &Reconciler{Config: cfg, NodeEvictionContext: sync.Map{}, DryRun: dryRunEnabled}
+}
+
+func (r *Reconciler) shouldSkipEvent(healthEventWithStatus datastore.HealthEventWithStatus) bool {
+	// Extract the HealthEvent using common utility
+	healthEvent, err := common.ExtractPlatformConnectorHealthEvent(&healthEventWithStatus)
+	if err != nil {
+		klog.Errorf("Failed to extract HealthEvent: %v", err)
+		return true // Skip event if extraction fails
+	}
+
+	action := healthEvent.RecommendedAction
+	nodeName := healthEvent.NodeName
+
+	switch action { // nolint:exhaustive  // we need to trim down the number of recommended actions
+	case platformconnectorprotos.RecommenedAction_NONE:
+		// NONE means no remediation needed
+		klog.Infof("Skipping event for node: %s, recommended action is NONE (no remediation needed)", nodeName)
+		return true
+	case platformconnectorprotos.RecommenedAction_COMPONENT_RESET,
+		platformconnectorprotos.RecommenedAction_RESTART_VM,
+		platformconnectorprotos.RecommenedAction_RESTART_BM:
+		// need to reboot the node, hence process this event
+		return false
+	default:
+		// All other actions are currently unsupported
+		klog.Infof("Unsupported recommended action %s for node %s. Only COMPONENT_RESET, RESTART_VM,"+
+			" and RESTART_BM are supported",
+			action.String(), nodeName)
+		totalUnsupportedRemediationActions.WithLabelValues(action.String(), nodeName).Inc()
+
+		return true
 	}
 }
 
+//nolint:cyclop // Matches main branch pattern
 func (r *Reconciler) Start(ctx context.Context) {
-	watcher, err := storewatcher.NewChangeStreamWatcher(ctx, r.Config.MongoConfig, r.Config.TokenConfig,
-		r.Config.MongoPipeline)
+	// Create change stream watcher directly (like main branch)
+	watcherConfig := watcher.Config{
+		ClientName: "fault-remediation-module",
+		TableName:  "HealthEvents",
+		Pipeline:   r.Config.Pipeline, // Pass pipeline from config (watches for drain completion)
+	}
+
+	changeStreamWatcher, err := watcher.CreateChangeStreamWatcher(ctx, r.Config.DataStore, watcherConfig)
 	if err != nil {
 		log.Fatalf("failed to create change stream watcher: %+v", err)
 	}
 
 	defer func() {
-		if err := watcher.Close(ctx); err != nil {
+		if err := changeStreamWatcher.Close(ctx); err != nil {
 			klog.Errorf("failed to close watcher: %+v", err)
 		}
 	}()
 
-	collection, err := storewatcher.GetCollectionClient(ctx, r.Config.MongoConfig)
-	if err != nil {
-		klog.Fatalf("error initializing collection client with config %+v for mongodb: %+v",
-			r.Config.MongoConfig, err)
-	}
+	changeStreamWatcher.Start(ctx)
 
-	watcher.Start(ctx)
 	klog.Info("Listening for events on the channel...")
 
-	for event := range watcher.Events() {
-		klog.Infof("Event received: %+v", event)
-		r.processEvent(ctx, event, watcher, collection)
-	}
-}
+	// Simple direct loop (matches main branch pattern)
+	for eventWithToken := range changeStreamWatcher.Events() {
+		klog.Info("Event received....")
 
-// processEvent handles a single event from the watcher
-func (r *Reconciler) processEvent(ctx context.Context, event bson.M, watcher WatcherInterface,
-	collection MongoInterface) {
-	totalEventsReceived.Inc()
+		totalEventsReceived.Inc()
 
-	healthEventWithStatus := HealthEventDoc{}
-	if err := storewatcher.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus); err != nil {
-		totalEventProcessingError.WithLabelValues("unmarshal_doc_error", "unknown").Inc()
-		klog.Errorf("Failed to unmarshal event: %+v", err)
+		// Extract health event from change stream to HealthEventDoc with ID
+		healthEventDoc := HealthEventDoc{}
 
-		if err := watcher.MarkProcessed(context.Background()); err != nil {
-			totalEventProcessingError.WithLabelValues("mark_processed_error", "unknown").Inc()
-			klog.Errorf("Error updating resume token: %v", err)
+		extractedEvent, err := common.ExtractHealthEventFromRawEvent(eventWithToken.Event)
+		if err != nil {
+			totalEventProcessingError.WithLabelValues("unmarshal_doc_error", "unknown").Inc()
+			klog.Errorf("Failed to extract health event: %+v", err)
+
+			if err := changeStreamWatcher.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
+				totalEventProcessingError.WithLabelValues("mark_processed_error", "unknown").Inc()
+				klog.Errorf("Error updating resume token: %+v", err)
+			}
+
+			continue
 		}
 
-		return
+		healthEventDoc.HealthEventWithStatus = *extractedEvent
+
+		// Extract K8s-compliant document ID for CR naming
+		healthEventDoc.ID = common.ExtractDocumentIDFromRawEvent(eventWithToken.Event, r.Config.DataStore)
+
+		// Extract node name for logging
+		healthEvent, err := common.ExtractPlatformConnectorHealthEvent(&healthEventDoc.HealthEventWithStatus)
+		if err != nil {
+			klog.Errorf("Failed to extract HealthEvent: %v", err)
+			totalEventProcessingError.WithLabelValues("extract_error", "unknown").Inc()
+
+			continue
+		}
+
+		// Run log collector for all non-NONE actions if enabled (matching main branch)
+		if healthEvent.RecommendedAction != platformconnectorprotos.RecommenedAction_NONE &&
+			r.Config.EnableLogCollector {
+			klog.Infof("Log collector feature enabled; running log collector for node %s", healthEvent.NodeName)
+
+			if err := r.Config.K8sClient.RunLogCollectorJob(ctx, healthEvent.NodeName); err != nil {
+				klog.Errorf("Log collector job failed for node %s: %v", healthEvent.NodeName, err)
+			}
+		}
+
+		eventSkipped, nodeRemediatedStatus := r.executeRemediation(ctx, healthEventDoc)
+		if !eventSkipped {
+			updateErr := r.updateNodeRemediatedStatus(
+				ctx, healthEvent.NodeName, nodeRemediatedStatus, eventWithToken.Event,
+			)
+			if updateErr != nil {
+				totalEventProcessingError.WithLabelValues("update_status_error", healthEvent.NodeName).Inc()
+				log.Printf("\nError updating remediation status for node: %+v\n", updateErr)
+			} else {
+				totalEventsSuccessfullyProcessed.Inc()
+			}
+		}
+
+		if err := changeStreamWatcher.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
+			totalEventProcessingError.WithLabelValues("mark_processed_error", healthEvent.NodeName).Inc()
+			klog.Errorf("Error updating resume token: %+v", err)
+		}
 	}
-
-	nodeName := healthEventWithStatus.HealthEventWithStatus.HealthEvent.NodeName
-	nodeQuarantined := healthEventWithStatus.HealthEventWithStatus.HealthEventStatus.NodeQuarantined
-
-	if nodeQuarantined != nil && *nodeQuarantined == storeconnector.UnQuarantined {
-		r.handleUnquarantineEvent(ctx, nodeName, watcher)
-		return
-	}
-
-	r.handleRemediationEvent(ctx, &healthEventWithStatus, event, watcher, collection)
 }
 
-func (r *Reconciler) shouldSkipEvent(ctx context.Context,
-	healthEventWithStatus storeconnector.HealthEventWithStatus) bool {
-	action := healthEventWithStatus.HealthEvent.RecommendedAction
-	nodeName := healthEventWithStatus.HealthEvent.NodeName
-
-	if action == platformconnector.RecommenedAction_NONE {
-		klog.Infof("Skipping event for node: %s, recommended action is NONE (no remediation needed)", nodeName)
-		return true
-	}
-
-	if common.GetRemediationGroupForAction(action) != "" {
-		return false
-	}
-
-	klog.Infof("Unsupported recommended action %s for node %s.", action.String(), nodeName)
-	totalUnsupportedRemediationActions.WithLabelValues(action.String(), nodeName).Inc()
-
-	_, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
-		healthEventWithStatus.HealthEvent.NodeName,
-		statemanager.RemediationFailedLabelValue, false)
+func (r *Reconciler) executeRemediation(ctx context.Context, healthEventWithStatus HealthEventDoc) (bool, bool) {
+	healthEvent, err := common.ExtractPlatformConnectorHealthEvent(&healthEventWithStatus.HealthEventWithStatus)
 	if err != nil {
-		klog.Errorf("Error updating node label to %s: %+v", statemanager.RemediationFailedLabelValue, err)
-		totalEventProcessingError.WithLabelValues("label_update_error",
-			healthEventWithStatus.HealthEvent.NodeName).Inc()
+		klog.Errorf("Failed to extract HealthEvent: %v", err)
+		return true, false // Skip event
 	}
 
-	return true
-}
-
-// runLogCollector runs log collector for non-NONE actions if enabled
-func (r *Reconciler) runLogCollector(ctx context.Context, healthEvent *platformconnector.HealthEvent) {
-	if healthEvent.RecommendedAction == platformconnector.RecommenedAction_NONE ||
-		!r.Config.EnableLogCollector {
-		return
-	}
-
-	klog.Infof("Log collector feature enabled; running log collector for node %s", healthEvent.NodeName)
-
-	if err := r.Config.RemediationClient.RunLogCollectorJob(ctx, healthEvent.NodeName); err != nil {
-		klog.Errorf("Log collector job failed for node %s: %v", healthEvent.NodeName, err)
-	}
-}
-
-// performRemediation attempts to create maintenance resource with retries
-func (r *Reconciler) performRemediation(ctx context.Context, healthEventWithStatus *HealthEventDoc) (bool, string) {
-	// Update state to "remediating"
-	_, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
-		healthEventWithStatus.HealthEventWithStatus.HealthEvent.NodeName,
+	_, err = r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx, healthEvent.NodeName,
 		statemanager.RemediatingLabelValue, false)
 	if err != nil {
-		klog.Errorf("Error updating node label to remediating: %+v", err)
-		totalEventProcessingError.WithLabelValues("label_update_error",
-			healthEventWithStatus.HealthEventWithStatus.HealthEvent.NodeName).Inc()
+		klog.Errorf("Error updating node label: %+v", err)
+		totalEventProcessingError.WithLabelValues("label_update_error", healthEvent.NodeName).Inc()
 	}
 
-	success := false
-	crName := ""
+	shouldSkipEvent := r.shouldSkipEvent(healthEventWithStatus.HealthEventWithStatus)
 
-	for i := 1; i <= r.Config.UpdateMaxRetries; i++ {
-		klog.Infof("Attempt %d, handle event for node: %s", i,
-			healthEventWithStatus.HealthEventWithStatus.HealthEvent.NodeName)
+	nodeRemediatedStatus := false
 
-		success, crName = r.Config.RemediationClient.CreateMaintenanceResource(ctx, healthEventWithStatus)
-		if success {
-			break
-		}
-
-		if i < r.Config.UpdateMaxRetries {
-			time.Sleep(r.Config.UpdateRetryDelay)
-		}
-	}
-
-	// Update final state based on success/failure
 	remediationLabelValue := statemanager.RemediationFailedLabelValue
-	if success {
-		remediationLabelValue = statemanager.RemediationSucceededLabelValue
-	}
 
-	_, err = r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
-		healthEventWithStatus.HealthEventWithStatus.HealthEvent.NodeName,
+	if !shouldSkipEvent {
+		for i := 1; i <= maxRetries; i++ {
+			klog.Infof("Attempt %d, handle event for node: %s", i, healthEvent.NodeName)
+
+			if r.Config.K8sClient.CreateMaintenanceResource(ctx, &healthEventWithStatus) {
+				nodeRemediatedStatus = true
+				remediationLabelValue = statemanager.RemediationSucceededLabelValue
+
+				break
+			}
+
+			if i < maxRetries {
+				time.Sleep(retryDelay)
+			}
+		}
+	}
+	// If shouldSkipEvent is true or if the nodeRemediatedStatus is false, we will update the state to remediation-failed,
+	// else we will update the state to remediation-succeeded.
+	_, err = r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx, healthEvent.NodeName,
 		remediationLabelValue, false)
 	if err != nil {
-		klog.Errorf("Error updating node label to %s: %+v", remediationLabelValue, err)
-		totalEventProcessingError.WithLabelValues("label_update_error",
-			healthEventWithStatus.HealthEventWithStatus.HealthEvent.NodeName).Inc()
+		klog.Errorf("Error updating node label: %+v", err)
+		totalEventProcessingError.WithLabelValues("label_update_error", healthEvent.NodeName).Inc()
 	}
 
-	return success, crName
+	return shouldSkipEvent, nodeRemediatedStatus
 }
 
-// handleUnquarantineEvent handles node unquarantine events by clearing annotations
-func (r *Reconciler) handleUnquarantineEvent(
-	ctx context.Context,
-	nodeName string,
-	watcher WatcherInterface,
-) {
-	klog.Infof("Node %s unquarantined, clearing remediation state annotation", nodeName)
-
-	if err := r.annotationManager.ClearRemediationState(ctx, nodeName); err != nil {
-		klog.Errorf("Failed to clear remediation state for node %s: %v", nodeName, err)
-	}
-
-	if err := watcher.MarkProcessed(context.Background()); err != nil {
-		totalEventProcessingError.WithLabelValues("mark_processed_error", nodeName).Inc()
-		klog.Errorf("Error updating resume token: %v", err)
-	}
-}
-
-// handleRemediationEvent processes remediation for quarantined nodes
-func (r *Reconciler) handleRemediationEvent(
-	ctx context.Context,
-	healthEventWithStatus *HealthEventDoc,
-	event bson.M,
-	watcher WatcherInterface,
-	collection MongoInterface,
-) {
-	healthEvent := healthEventWithStatus.HealthEventWithStatus.HealthEvent
-	nodeName := healthEvent.NodeName
-
-	r.runLogCollector(ctx, healthEvent)
-
-	// Check if we should skip this event (NONE actions or unsupported actions)
-	if r.shouldSkipEvent(ctx, healthEventWithStatus.HealthEventWithStatus) {
-		if err := watcher.MarkProcessed(ctx); err != nil {
-			totalEventProcessingError.WithLabelValues("mark_processed_error", nodeName).Inc()
-			klog.Errorf("Error updating resume token: %v", err)
-		}
-
-		return
-	}
-
-	shouldCreateCR, existingCR, err := r.checkExistingCRStatus(ctx, healthEvent)
-	if err != nil {
-		totalEventProcessingError.WithLabelValues("cr_status_check_error", nodeName).Inc()
-		klog.Errorf("Error checking existing CR status for node %s: %v", nodeName, err)
-	}
-
-	if !shouldCreateCR {
-		klog.Infof("Skipping event for node %s due to existing CR %s", nodeName, existingCR)
-
-		if err := watcher.MarkProcessed(ctx); err != nil {
-			totalEventProcessingError.WithLabelValues("mark_processed_error", nodeName).Inc()
-			klog.Errorf("Error updating resume token: %v", err)
-		}
-
-		return
-	}
-
-	nodeRemediatedStatus, _ := r.performRemediation(ctx, healthEventWithStatus)
-
-	if err := r.updateNodeRemediatedStatus(ctx, collection, event, nodeRemediatedStatus); err != nil {
-		totalEventProcessingError.WithLabelValues("update_status_error", nodeName).Inc()
-		log.Printf("\nError updating remediation status for node: %+v\n", err)
-
-		return
-	}
-
-	totalEventsSuccessfullyProcessed.Inc()
-
-	if err := watcher.MarkProcessed(ctx); err != nil {
-		totalEventProcessingError.WithLabelValues("mark_processed_error", nodeName).Inc()
-		klog.Errorf("Error updating resume token: %v", err)
-	}
-}
-
-func (r *Reconciler) updateNodeRemediatedStatus(ctx context.Context, collection MongoInterface,
-	event bson.M, nodeRemediatedStatus bool) error {
+func (r *Reconciler) updateNodeRemediatedStatus(
+	ctx context.Context, nodeName string, nodeRemediatedStatus bool, rawEvent map[string]interface{},
+) error {
 	var err error
 
-	document, ok := event["fullDocument"].(bson.M)
-	if !ok {
-		return fmt.Errorf("error extracting fullDocument from event: %+v", event)
+	rawObjectID := common.ExtractDocumentIDForUpdate(rawEvent, r.Config.DataStore)
+	if rawObjectID == "" {
+		klog.V(2).Infof("Could not extract ObjectID from raw event for node %s, skipping database status update", nodeName)
+		return nil
 	}
 
-	filter := bson.M{"_id": document["_id"]}
-
-	updateFields := bson.M{
-		"healtheventstatus.faultremediated": nodeRemediatedStatus,
+	status := datastore.HealthEventStatus{
+		FaultRemediated: &nodeRemediatedStatus,
 	}
 
-	// If remediation was successful, set the timestamp
-	if nodeRemediatedStatus {
-		updateFields["healtheventstatus.lastremediationtimestamp"] = time.Now().UTC()
-	}
+	for i := 1; i <= maxRetries; i++ {
+		klog.Infof("Attempt %d, updating health event for node %s with ID %s", i, nodeName, rawObjectID)
 
-	update := bson.M{
-		"$set": updateFields,
-	}
-
-	for i := 1; i <= r.Config.UpdateMaxRetries; i++ {
-		klog.Infof("Attempt %d, updating health event with ID %v", i, document["_id"])
-
-		_, err = collection.UpdateOne(ctx, filter, update)
+		err = r.Config.DataStore.HealthEventStore().UpdateHealthEventStatus(ctx, rawObjectID, status)
 		if err == nil {
 			break
 		}
 
-		time.Sleep(r.Config.UpdateRetryDelay)
+		time.Sleep(retryDelay)
 	}
 
 	if err != nil {
-		return fmt.Errorf("error updating document with ID: %v, error: %w", document["_id"], err)
+		return fmt.Errorf("error updating document with ID: %v, error: %w", rawObjectID, err)
 	}
 
-	klog.Infof("Health event with ID %v has been updated with status %+v", document["_id"], nodeRemediatedStatus)
+	klog.Infof("Health event with ID %v has been updated with status %+v", rawObjectID, nodeRemediatedStatus)
 
 	return nil
-}
-
-// handleCRStatus processes the CR status and determines if a new CR should be created
-func (r *Reconciler) handleCRStatus(
-	ctx context.Context,
-	nodeName, group string,
-	crName string,
-	status crstatus.CRStatus,
-) (shouldCreateCR bool, existingCR string) {
-	switch status {
-	case crstatus.CRStatusSucceeded, crstatus.CRStatusInProgress:
-		// Don't create new CR, remediation is complete or in progress
-		klog.Infof("Skipping event for node %s - CR %s is %s", nodeName, crName, status)
-
-		return false, crName
-	case crstatus.CRStatusFailed:
-		// Previous CR failed, remove it from annotation and allow retry
-		klog.Infof("Previous CR %s failed for node %s, allowing retry", crName, nodeName)
-
-		if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, group); err != nil {
-			klog.Errorf("Failed to remove failed CR from annotation: %v", err)
-		}
-
-		return true, ""
-	case crstatus.CRStatusNotFound:
-		// CR doesn't exist anymore, clean up annotation
-		klog.Infof("CR %s not found for node %s, cleaning up annotation", crName, nodeName)
-
-		if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, group); err != nil {
-			klog.Errorf("Failed to remove stale CR from annotation: %v", err)
-		}
-
-		return true, ""
-	}
-
-	return true, ""
-}
-
-// checkExistingCRStatus checks if there's an existing CR for the same equivalence group
-// and determines whether to create a new CR based on its status
-func (r *Reconciler) checkExistingCRStatus(
-	ctx context.Context,
-	healthEvent *platformconnector.HealthEvent,
-) (bool, string, error) {
-	nodeName := healthEvent.NodeName
-	group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
-
-	if group == "" {
-		// Action is not part of any remediation group, allow creating CR
-		return true, "", nil
-	}
-
-	// Get current remediation state from node annotation
-	state, err := r.annotationManager.GetRemediationState(ctx, nodeName)
-	if err != nil {
-		klog.Errorf("Error getting remediation state for node %s: %v", nodeName, err)
-		// On error, allow creating CR
-		return true, "", nil
-	}
-
-	if state == nil {
-		klog.Warningf("Remediation state is nil for node %s, allowing CR creation", nodeName)
-		return true, "", nil
-	}
-
-	// Check if there's an existing CR for this group
-	groupState, exists := state.EquivalenceGroups[group]
-	if !exists {
-		// No existing CR for this group, allow creating new one
-		return true, "", nil
-	}
-
-	// Get the appropriate status checker for this action
-	statusChecker, err := r.remediationClient.GetStatusCheckerForAction(healthEvent.RecommendedAction)
-	if err != nil {
-		klog.Errorf("Error getting status checker for action %s: %v", healthEvent.RecommendedAction, err)
-		// On error, allow creating CR
-		return true, "", nil
-	}
-
-	// Check the CR status
-	status, err := statusChecker.GetCRStatus(ctx, groupState.MaintenanceCR)
-	if err != nil {
-		klog.Errorf("Error checking CR status for %s: %v", groupState.MaintenanceCR, err)
-		// On error checking status, assume NotFound
-		status = crstatus.CRStatusNotFound
-	}
-
-	klog.Infof("Found existing CR %s for node %s group %s with status %s",
-		groupState.MaintenanceCR, nodeName, group, status)
-
-	// Decide based on CR status
-	shouldCreate, existingCRName := r.handleCRStatus(ctx, nodeName, group, groupState.MaintenanceCR, status)
-
-	return shouldCreate, existingCRName, nil
 }

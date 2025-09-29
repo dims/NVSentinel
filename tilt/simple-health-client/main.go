@@ -18,12 +18,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "simple-health-client/protos"
@@ -42,13 +44,25 @@ func main() {
 			return
 		}
 
+		// Read the request body
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error reading body: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Use protojson to properly unmarshal protobuf messages with enum fields
 		var healthEvent pb.HealthEvent
-		if err := json.NewDecoder(r.Body).Decode(&healthEvent); err != nil {
+		if err := protojson.Unmarshal(bodyBytes, &healthEvent); err != nil {
 			http.Error(w, fmt.Sprintf("Error parsing JSON: %v", err), http.StatusBadRequest)
 			return
 		}
 
 		healthEvent.GeneratedTimestamp = timestamppb.Now()
+
+		// Debug logging to verify recommendedAction is properly parsed
+		log.Printf("Received health event: Node=%s, RecommendedAction=%v (%d)",
+			healthEvent.NodeName, healthEvent.RecommendedAction, healthEvent.RecommendedAction)
 
 		conn, err := grpc.NewClient(
 			fmt.Sprintf("unix://%s", socketPath),
