@@ -25,6 +25,7 @@ import (
 
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/kubernetes"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers" // Register all datastore providers
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"k8s.io/apimachinery/pkg/util/json"
@@ -49,8 +50,8 @@ func main() {
 
 	var metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
 
-	var mongoClientCertMountPath = flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
+	// Initialize klog flags to allow command-line control (e.g., -v=3)
+	klog.InitFlags(nil)
 
 	flag.Parse()
 
@@ -106,7 +107,8 @@ func main() {
 	if enableMongoDBStorePlatformConnector == True {
 		ringBuffer := ringbuffer.NewRingBuffer("mongodbStore", ctx)
 		server.InitializeAndAttachRingBufferForConnectors(ringBuffer)
-		storeConnector := store.InitializeMongoDbStoreConnector(ctx, ringBuffer, *mongoClientCertMountPath)
+		// Use store-client-sdk abstraction instead of direct MongoDB initialization
+		storeConnector := store.InitializeStoreConnector(ctx, ringBuffer)
 
 		go storeConnector.FetchAndProcessHealthMetric(ctx)
 	}

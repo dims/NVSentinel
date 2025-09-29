@@ -203,13 +203,9 @@ func TestNodeInformer_EventHandlers(t *testing.T) {
 	// Need access to the informer's store to add/update/delete objects directly
 	store := ni.informer.GetStore()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		// Run blocks until sync or stopCh is closed
-		_ = ni.Run(stopCh)
-	}()
+	// Start the informer goroutine but don't call ni.Run() which would also trigger handlers
+	// We want to manually trigger handlers for unit testing
+	go ni.informer.Run(stopCh)
 
 	// Wait for initial sync
 	waitForSync(t, stopCh, ni.informerSynced)
@@ -244,7 +240,7 @@ func TestNodeInformer_EventHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to add node1 to store: %v", err)
 	}
-	ni.handleAddNode(node1)                // Manually trigger handler
+	ni.handleAddNode(node1)                // Manually trigger handler for testing
 	safeReceiveSignal(t, workSignal, true) // Expect signal, with timeout
 	drainSignals()                         // Drain any extra signals
 	total, unschedulableMap, err = ni.GetGpuNodeCounts()
@@ -258,7 +254,7 @@ func TestNodeInformer_EventHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to update node1 in store: %v", err)
 	}
-	ni.handleUpdateNode(node1, node1Cordoned) // Manually trigger handler
+	ni.handleUpdateNode(node1, node1Cordoned) // Manually trigger handler for testing
 	safeReceiveSignal(t, workSignal, true)    // Expect signal, with timeout
 	drainSignals()
 	total, unschedulableMap, err = ni.GetGpuNodeCounts()
@@ -289,7 +285,7 @@ func TestNodeInformer_EventHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to delete node1 from store: %v", err)
 	}
-	ni.handleDeleteNode(node1CordonedUpdated) // Manually trigger handler
+	ni.handleDeleteNode(node1CordonedUpdated) // Manually trigger handler for testing
 	safeReceiveSignal(t, workSignal, true)    // Expect signal, with timeout
 	drainSignals()
 
@@ -328,9 +324,6 @@ func TestNodeInformer_EventHandlers(t *testing.T) {
 	if err != nil || total != 0 || len(unschedulableMap) != 0 {
 		t.Errorf("After deleting node2 via tombstone: expected total=0, unschedulable=0, err=nil; got total=%d, unschedulable=%d, err=%v", total, len(unschedulableMap), err)
 	}
-
-	// The deferred close(stopCh) will signal the Run goroutine to stop.
-	wg.Wait()
 }
 
 func TestNodeInformer_RecalculateCounts(t *testing.T) {

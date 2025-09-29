@@ -44,7 +44,6 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           args:
           - "--metrics-port={{ .Values.global.metricsPort }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "--dry-run={{ .Values.global.dryRun }}"
           - "--circuit-breaker-percentage={{ .Values.circuitBreaker.percentage }}"
           - "--circuit-breaker-duration={{ .Values.circuitBreaker.duration }}"
@@ -65,6 +64,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+              value: {{ .Values.clientCertMountPath }}
           envFrom:
             - configMapRef:
                 name: mongodb-config

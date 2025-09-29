@@ -24,15 +24,27 @@ ENV CGO_ENABLED=0
 
 WORKDIR /go/src
 
-COPY fault-remediation-module ./fault-remediation-module
-COPY platform-connectors ./platform-connectors
-COPY statemanager ./statemanager
+# Copy go modules and dependencies
+COPY fault-remediation-module/go.mod fault-remediation-module/go.sum ./fault-remediation-module/
+COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
+COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
+COPY statemanager/go.mod statemanager/go.sum ./statemanager/
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
+COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+
+# Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/
+COPY platform-connectors/ ./platform-connectors/
+COPY statemanager/ ./statemanager/
+COPY health-monitors/ ./health-monitors/
+
+# Copy main module source
+COPY fault-remediation-module/ ./fault-remediation-module/
 
 WORKDIR /go/src/fault-remediation-module
 
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download 
+    go mod download
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -o faultremediation cmd/fault-remediation/main.go

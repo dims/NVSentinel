@@ -45,7 +45,6 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           args:
           - "--metrics-port={{ .Values.global.metricsPort }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "-v={{ .Values.logLevel }}"
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
@@ -58,6 +57,9 @@ spec:
             readOnly: true
           - name: var-run-vol
             mountPath: /var/run/
+          env:
+            - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+              value: {{ .Values.clientCertMountPath }}
           envFrom:
             - configMapRef:
                 name: mongodb-config

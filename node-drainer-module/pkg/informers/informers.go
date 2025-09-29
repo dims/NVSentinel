@@ -34,7 +34,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/metrics"
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 )
 
 const (
@@ -434,7 +434,7 @@ func (i *Informers) UpdateNodeEvent(ctx context.Context, nodeName string, reason
 }
 
 func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string, namespaces []string,
-	timeout int, event *storeconnector.HealthEventWithStatus) error {
+	timeout int, event *datastore.HealthEventWithStatus) error {
 	drainTimeout, err := i.getNodeDrainTimeout(timeout, event)
 	if err != nil {
 		klog.Errorf("Failed to get node drain timeout: %v", err)
@@ -492,7 +492,7 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 }
 
 func (i *Informers) getNodeDrainTimeout(timeout int,
-	event *storeconnector.HealthEventWithStatus) (time.Duration, error) {
+	event *datastore.HealthEventWithStatus) (time.Duration, error) {
 	elapsed := time.Since(event.CreatedAt)
 	drainTimeout := time.Duration(timeout) * time.Minute
 

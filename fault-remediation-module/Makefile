@@ -41,6 +41,7 @@ include ../common.mk
 # LEGACY COMPATIBILITY
 # =============================================================================
 
+# Legacy targets for backwards compatibility
 .PHONY: image publish
 image: docker-build
 publish: docker-publish

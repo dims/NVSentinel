@@ -20,36 +20,39 @@ ARG IMG=nvcr.io/nvidia/distroless/go
 FROM public.ecr.aws/docker/library/golang:1.24-bullseye AS builder
 
 # TODO: remove when pushing to GitHub
+ENV GOPRIVATE=*.nvidia.com
+ENV CGO_ENABLED=0
 
-WORKDIR /go/src/nvsentinel
+WORKDIR /go/src
 
-# Copy the go.mod files for dependencies first
-COPY platform-connectors/go.mod platform-connectors/go.sum platform-connectors/
-COPY store-client-sdk/go.mod store-client-sdk/go.sum store-client-sdk/
-COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum health-monitors/csp-health-monitor/
+# Copy go modules and dependencies
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
+COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
+COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
 
-# Download dependencies
+# Copy dependency source code
+COPY store-client-sdk/ ./store-client-sdk/
+COPY platform-connectors/ ./platform-connectors/
+
+# Copy main module source
+COPY health-monitors/csp-health-monitor/ ./health-monitors/csp-health-monitor/
+
+WORKDIR /go/src/health-monitors/csp-health-monitor
+
 RUN --mount=type=cache,target=/go/pkg/mod \
-    cd health-monitors/csp-health-monitor && go mod download
-
-# Copy the source code
-COPY platform-connectors/ platform-connectors/
-COPY store-client-sdk/ store-client-sdk/
-COPY health-monitors/csp-health-monitor/ health-monitors/csp-health-monitor/
+    go mod download
 
 RUN --mount=type=cache,target=/go/pkg/mod \
-    cd health-monitors/csp-health-monitor && \
     go build -trimpath -o csp-health-monitor ./cmd/csp-health-monitor/main.go
 
 RUN --mount=type=cache,target=/go/pkg/mod \
-    cd health-monitors/csp-health-monitor && \
     go build -trimpath -o maintenance-notifier ./cmd/maintenance-notifier/main.go
 
 FROM ${IMG}:${TAG}
 
 WORKDIR /app
 
-COPY --from=builder /go/src/nvsentinel/health-monitors/csp-health-monitor/csp-health-monitor ./
-COPY --from=builder /go/src/nvsentinel/health-monitors/csp-health-monitor/maintenance-notifier ./
+COPY --from=builder /go/src/health-monitors/csp-health-monitor/csp-health-monitor ./
+COPY --from=builder /go/src/health-monitors/csp-health-monitor/maintenance-notifier ./
 
 ENTRYPOINT ["/app/csp-health-monitor"]

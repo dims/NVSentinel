@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package storewatcher
+package mongodb
 
 import (
 	"context"
@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -154,11 +155,13 @@ func TestChangeStreamWatcher_Start(t *testing.T) {
 		resumeTokenCol := mt.Client.Database("tokendb").Collection("tokencollection")
 
 		watcher := &ChangeStreamWatcher{
-			client:         mt.Client,
-			changeStream:   changeStream,
-			eventChannel:   make(chan bson.M, 2),
-			resumeTokenCol: resumeTokenCol,
-			clientName:     "testclient",
+			client:                    mt.Client,
+			changeStream:              changeStream,
+			eventChannel:              make(chan datastore.EventWithToken, 2),
+			resumeTokenCol:            resumeTokenCol,
+			clientName:                "testclient",
+			resumeTokenUpdateTimeout:  5 * time.Second,
+			resumeTokenUpdateInterval: 1 * time.Second,
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -171,8 +174,8 @@ func TestChangeStreamWatcher_Start(t *testing.T) {
 		timeout := time.After(2 * time.Second)
 		for len(receivedEvents) < 2 {
 			select {
-			case event := <-watcher.Events():
-				receivedEvents = append(receivedEvents, event)
+			case eventWithToken := <-watcher.Events():
+				receivedEvents = append(receivedEvents, eventWithToken.Event)
 			case <-timeout:
 				t.Fatal("timeout waiting for events")
 			}
@@ -230,7 +233,7 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 		watcher := &ChangeStreamWatcher{
 			client:                    mt.Client,
 			changeStream:              changeStream,
-			eventChannel:              make(chan bson.M, 1),
+			eventChannel:              make(chan datastore.EventWithToken, 1),
 			resumeTokenCol:            resumeTokenCol,
 			clientName:                "testclient-success-first",
 			resumeTokenUpdateTimeout:  5 * time.Second,
@@ -242,14 +245,15 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 
 		watcher.Start(ctx)
 
+		var eventWithToken datastore.EventWithToken
 		select {
-		case ev := <-watcher.Events():
-			require.NotEmpty(t, ev)
+		case eventWithToken = <-watcher.Events():
+			require.NotEmpty(t, eventWithToken)
 		case <-time.After(2 * time.Second):
 			t.Fatal("timeout waiting for event")
 		}
 
-		err = watcher.MarkProcessed(ctx)
+		err = watcher.MarkProcessed(ctx, eventWithToken.ResumeToken)
 		require.NoError(t, err)
 
 		// Verify the UpdateOne command was called once
@@ -278,8 +282,17 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 				update := update0["u"].(bson.M)
 
 				require.EqualValues(t, bson.M{"clientName": "testclient-success-first"}, filter)
-				expectedUpdate := bson.M{"$set": bson.M{"resumeToken": bson.M{"ts": int64(1), "t": int32(1)}}}
-				require.EqualValues(t, expectedUpdate, update)
+
+				// Verify the update structure
+				setClause := update["$set"].(bson.M)
+				require.NotNil(t, setClause, "$set clause should exist")
+
+				// Check resumeToken
+				resumeToken := setClause["resumeToken"].(bson.M)
+				require.EqualValues(t, bson.M{"ts": int64(1), "t": int32(1)}, resumeToken)
+
+				// Check timestamp exists (value will be current time, so just check it exists)
+				require.Contains(t, setClause, "timestamp", "timestamp should be set")
 			}
 		}
 		require.Equal(t, 1, updateCommands, "Expected exactly one update command")
@@ -315,7 +328,7 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 		watcher := &ChangeStreamWatcher{
 			client:                    mt.Client,
 			changeStream:              changeStream,
-			eventChannel:              make(chan bson.M, 1),
+			eventChannel:              make(chan datastore.EventWithToken, 1),
 			resumeTokenCol:            resumeTokenCol,
 			clientName:                "testclient-retry-success",
 			resumeTokenUpdateTimeout:  5 * time.Second,
@@ -327,14 +340,15 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 
 		watcher.Start(ctx)
 
+		var eventWithToken datastore.EventWithToken
 		select {
-		case ev := <-watcher.Events():
-			require.NotEmpty(t, ev)
+		case eventWithToken = <-watcher.Events():
+			require.NotEmpty(t, eventWithToken)
 		case <-time.After(2 * time.Second):
 			t.Fatal("timeout waiting for event")
 		}
 
-		err = watcher.MarkProcessed(ctx)
+		err = watcher.MarkProcessed(ctx, eventWithToken.ResumeToken)
 		require.NoError(t, err)
 
 		// Verify the UpdateOne command was called twice
@@ -383,7 +397,7 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 		watcher := &ChangeStreamWatcher{
 			client:                    mt.Client,
 			changeStream:              changeStream,
-			eventChannel:              make(chan bson.M, 1),
+			eventChannel:              make(chan datastore.EventWithToken, 1),
 			resumeTokenCol:            resumeTokenCol,
 			clientName:                "testclient-timeout",
 			resumeTokenUpdateTimeout:  5 * time.Second,
@@ -395,17 +409,18 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 
 		watcher.Start(ctx)
 
+		var eventWithToken datastore.EventWithToken
 		select {
-		case ev := <-watcher.Events():
-			require.NotEmpty(t, ev)
+		case eventWithToken = <-watcher.Events():
+			require.NotEmpty(t, eventWithToken)
 		case <-time.After(2 * time.Second):
 			t.Fatal("timeout waiting for event")
 		}
 
-		err = watcher.MarkProcessed(ctx)
+		err = watcher.MarkProcessed(ctx, eventWithToken.ResumeToken)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "retrying storing resume token for client testclient-timeout timed out")
-		require.Contains(t, err.Error(), "persistent network error 5")
+		require.Contains(t, err.Error(), "persistent network error")
 
 		// Verify the UpdateOne command was called multiple times
 		startedEvents := mt.GetAllStartedEvents()

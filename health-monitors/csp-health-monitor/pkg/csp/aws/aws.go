@@ -26,11 +26,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/health"
 	"github.com/aws/aws-sdk-go-v2/service/health/types"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -110,7 +110,7 @@ type AWSClient struct {
 	normalizer     eventpkg.Normalizer
 	clusterName    string
 	kubeconfigPath string
-	store          datastore.Store
+	store          datastore.DataStore
 }
 
 // NewClient creates a new AWS client.
@@ -119,7 +119,7 @@ func NewClient(
 	cfg config.AWSConfig,
 	clusterName string,
 	kubeconfigPath string,
-	store datastore.Store,
+	store datastore.DataStore,
 ) (*AWSClient, error) {
 	// default: max attempts = 3, back off delay = 20s
 	awsSDKConfig, err := awsConfig.LoadDefaultConfig(ctx,
@@ -252,7 +252,7 @@ func (c *AWSClient) getInitialPollStartTime(
 		return defaultPollStartTime
 	}
 
-	lastProcessedEventTS, found, errDb := c.store.GetLastProcessedEventTimestampByCSP(
+	lastProcessedEventTS, found, errDb := c.store.MaintenanceEventStore().GetLastProcessedEventTimestampByCSP(
 		ctx,
 		c.clusterName,
 		model.CSPAWS,
@@ -573,7 +573,7 @@ func (c *AWSClient) getAffectedEntities(
 func (c *AWSClient) pollActiveEvents(ctx context.Context, eventChan chan<- model.MaintenanceEvent) error {
 	klog.Info("Polling active events")
 
-	activeEvents, err := c.store.FindActiveEventsByStatuses(ctx, model.CSPAWS, []string{
+	activeEvents, err := c.store.MaintenanceEventStore().FindActiveEventsByStatuses(ctx, model.CSPAWS, []string{
 		"upcoming",
 		"open",
 	})
@@ -597,7 +597,7 @@ func (c *AWSClient) pollActiveEvents(ctx context.Context, eventChan chan<- model
 		if awsStatus == string(model.CSPStatusUnknown) {
 			klog.Warningf("AWS status is unknown for event %s", activeEvent.Metadata["eventArn"])
 
-			err := c.store.UpdateEventStatus(ctx, activeEvent.EventID, model.StatusError)
+			err := c.store.MaintenanceEventStore().UpdateEventStatus(ctx, activeEvent.EventID, model.StatusError)
 			if err != nil {
 				return fmt.Errorf("failed to update event status: %w", err)
 			}

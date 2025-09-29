@@ -16,67 +16,68 @@ package common
 
 import (
 	"context"
-	"fmt"
 
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	"go.mongodb.org/mongo-driver/bson"
-	"k8s.io/klog"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/buffer"
+	sdkcommon "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/common"
 )
 
-// healthEventInfo represents information about a health event
-type HealthEventInfo struct {
-	HealthEventWithStatus *storeconnector.HealthEventWithStatus
-	EventBson             bson.M
-	HasProcessed          bool
+// HealthEventInfo represents information about a health event
+// This is now an alias to the generic buffer's EventInfo
+type HealthEventInfo = buffer.EventInfo[*datastore.HealthEventWithStatus]
+
+// HealthEventBuffer is a wrapper around the generic EventBuffer
+// that maintains backward compatibility with fault-quarantine's existing API
+type HealthEventBuffer struct {
+	buffer *buffer.EventBuffer[*datastore.HealthEventWithStatus]
+	ctx    context.Context // Kept for backward compatibility, though not used
 }
 
-// HealthEventBuffer represents a buffer of health events using an array
-type HealthEventBuffer struct {
-	events []HealthEventInfo
-	ctx    context.Context
+// healthEventKeyExtractor extracts the node name from a health event for deduplication
+func healthEventKeyExtractor(event *datastore.HealthEventWithStatus) (string, error) {
+	healthEvent, err := sdkcommon.ExtractPlatformConnectorsHealthEvent(event)
+	if err != nil {
+		return "", err
+	}
+
+	return healthEvent.NodeName, nil
 }
 
 // NewHealthEventBuffer creates a new health event buffer.
 func NewHealthEventBuffer(ctx context.Context) *HealthEventBuffer {
 	return &HealthEventBuffer{
-		events: make([]HealthEventInfo, 0),
+		buffer: buffer.NewEventBuffer(0, healthEventKeyExtractor), // 0 = use default size (1000)
 		ctx:    ctx,
 	}
 }
 
 // Add adds a health event at the end of the buffer.
-func (b *HealthEventBuffer) Add(event *storeconnector.HealthEventWithStatus, eventBson bson.M) {
-	b.events = append(b.events, HealthEventInfo{
-		HealthEventWithStatus: event,
-		EventBson:             eventBson,
-		HasProcessed:          false,
-	})
+// De-duplicates: if node already in buffer, updates event instead of adding duplicate
+// Returns true if added/updated, false if buffer is full
+func (b *HealthEventBuffer) Add(
+	event *datastore.HealthEventWithStatus,
+	eventData map[string]interface{},
+	resumeToken []byte,
+) bool {
+	return b.buffer.Add(event, eventData, resumeToken)
 }
 
 // RemoveAt removes an element at the specified index.
 func (b *HealthEventBuffer) RemoveAt(index int) error {
-	if index < 0 || index >= len(b.events) {
-		return fmt.Errorf("index out of bounds: %d", index)
-	}
-
-	klog.Infof("Removing event at index %d: %+v", index, b.events[index].HealthEventWithStatus)
-
-	// Remove the element at index
-	b.events = append(b.events[:index], b.events[index+1:]...)
-
-	return nil
+	return b.buffer.RemoveAt(index)
 }
 
 // Length returns the current number of elements in the buffer.
 func (b *HealthEventBuffer) Length() int {
-	return len(b.events)
+	return b.buffer.Length()
 }
 
 // Get returns the element at the specified index without removing it.
 func (b *HealthEventBuffer) Get(index int) (*HealthEventInfo, error) {
-	if index < 0 || index >= len(b.events) {
-		return nil, fmt.Errorf("index out of bounds or buffer is empty") // Index out of bounds or buffer is empty
+	info := b.buffer.Get(index)
+	if info == nil {
+		return nil, nil
 	}
 
-	return &b.events[index], nil
+	return info, nil
 }

@@ -59,7 +59,6 @@ spec:
           args:
           - "--config=/etc/config/config.toml"
           - "--metrics-port={{ .Values.global.metricsPort }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "-v={{ .Values.logLevel }}"
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -86,7 +85,6 @@ spec:
           command: ["/app/maintenance-notifier"]
           args:
           - "--config=/etc/config/config.toml"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "--uds-path={{ .Values.udsPath }}"
           - "--metrics-port={{ .Values.quarantineTriggerEngine.metricsPort }}"
           - "-v={{ .Values.quarantineTriggerEngine.logLevel | default .Values.logLevel }}"

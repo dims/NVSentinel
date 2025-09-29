@@ -38,21 +38,13 @@ spec:
       serviceAccountName: {{ include "nvsentinel.serviceAccountName" . }}
       containers:
         - name: fault-remediation
-          env:
-          - name: MAINTENANCE_NAMESPACE
-            value: {{ .Values.maintenanceResource.namespace }}
-          - name: MAINTENANCE_VERSION
-            value: {{ .Values.maintenanceResource.version }}
-          - name: MAINTENANCE_API_GROUP
-            value: {{ .Values.maintenanceResource.apiGroup }}
-
           image: "{{ .Values.global.faultRemediationModule.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.global.faultRemediationModule.image.pullPolicy | default "IfNotPresent" }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           args:
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "--dry-run={{ .Values.global.dryRun }}"
+          - "-v=4"
           ports:
             - name: metrics
               containerPort: {{ .Values.global.metricsPort }}
@@ -69,6 +61,8 @@ spec:
             value: {{ .Values.maintenanceResource.version }}
           - name: MAINTENANCE_API_GROUP
             value: {{ .Values.maintenanceResource.apiGroup }}
+          - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+            value: {{ .Values.clientCertMountPath }}
           - name: TEMPLATE_MOUNT_PATH
             value: {{ .Values.maintenanceResource.template.mountPath }}
           - name: TEMPLATE_FILE_NAME
