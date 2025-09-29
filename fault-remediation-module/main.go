@@ -21,19 +21,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
-	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 	"github.com/nvidia/nvsentinel/statemanager"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers" // Register all datastore providers
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 var (
@@ -44,18 +40,17 @@ var (
 )
 
 type config struct {
-	namespace                string
-	version                  string
-	apiGroup                 string
-	templateMountPath        string
-	templateFileName         string
-	metricsPort              string
-	mongoClientCertMountPath string
-	kubeconfigPath           string
-	dryRun                   bool
-	enableLogCollector       bool
-	updateMaxRetries         int
-	updateRetryDelaySeconds  int
+	namespace               string
+	version                 string
+	apiGroup                string
+	templateMountPath       string
+	templateFileName        string
+	metricsPort             string
+	kubeconfigPath          string
+	dryRun                  bool
+	enableLogCollector      bool
+	updateMaxRetries        int
+	updateRetryDelaySeconds int
 }
 
 // parseFlags parses command-line flags and returns a config struct.
@@ -63,8 +58,6 @@ func parseFlags() *config {
 	cfg := &config{}
 
 	flag.StringVar(&cfg.metricsPort, "metrics-port", "2112", "port to expose Prometheus metrics on")
-	flag.StringVar(&cfg.mongoClientCertMountPath, "mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
 	flag.StringVar(&cfg.kubeconfigPath, "kubeconfig-path", "", "path to kubeconfig file")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "flag to run node drainer module in dry-run mode")
 	flag.IntVar(&cfg.updateMaxRetries, "update-max-retries", 5,
@@ -109,79 +102,6 @@ func getRequiredEnvVars() (*config, error) {
 	return cfg, nil
 }
 
-func getMongoDBConfig(mongoClientCertMountPath string) (*storewatcher.MongoDBConfig, error) {
-	requiredEnvVars := map[string]string{
-		"MONGODB_URI":                   "MongoDB URI",
-		"MONGODB_DATABASE_NAME":         "MongoDB Database name",
-		"MONGODB_COLLECTION_NAME":       "MongoDB collection name",
-		"MONGODB_TOKEN_COLLECTION_NAME": "MongoDB token collection name",
-	}
-
-	envVars := make(map[string]string)
-
-	for envVar, description := range requiredEnvVars {
-		value := os.Getenv(envVar)
-		if value == "" {
-			return nil, fmt.Errorf("%s is not provided", description)
-		}
-
-		envVars[envVar] = value
-	}
-
-	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
-	if err != nil {
-		return nil, fmt.Errorf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return nil, fmt.Errorf("invalid MONGODB_PING_INTERVAL_SECONDS: %w", err)
-	}
-
-	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CA_CERT_READ_INTERVAL_SECONDS: %w", err)
-	}
-
-	return &storewatcher.MongoDBConfig{
-		URI:        envVars["MONGODB_URI"],
-		Database:   envVars["MONGODB_DATABASE_NAME"],
-		Collection: envVars["MONGODB_COLLECTION_NAME"],
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    totalTimeoutSeconds,
-		TotalPingIntervalSeconds:   intervalSeconds,
-		TotalCACertTimeoutSeconds:  totalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: intervalCACertSeconds,
-	}, nil
-}
-
-func getTokenConfig() (*storewatcher.TokenConfig, error) {
-	tokenDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		return nil, fmt.Errorf("MongoDB token database name is not provided")
-	}
-
-	tokenCollection := os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		return nil, fmt.Errorf("MongoDB token collection name is not provided")
-	}
-
-	return &storewatcher.TokenConfig{
-		ClientName:      "fault-remediation-module",
-		TokenDatabase:   tokenDatabase,
-		TokenCollection: tokenCollection,
-	}, nil
-}
-
 func startMetricsServer(metricsPort string) {
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
@@ -200,29 +120,29 @@ func startMetricsServer(metricsPort string) {
 	slog.Info("Metrics server goroutine started")
 }
 
-func getMongoPipeline() mongo.Pipeline {
-	return mongo.Pipeline{
-		bson.D{
-			bson.E{Key: "$match", Value: bson.D{
-				bson.E{Key: "operationType", Value: "update"},
-				bson.E{Key: "$or", Value: bson.A{
+func getMongoPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "update"),
+				datastore.E("$or", datastore.A(
 					// Watch for quarantine events (for remediation)
-					bson.D{
-						bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: bson.D{
-							bson.E{Key: "$in", Value: bson.A{store.StatusSucceeded, store.AlreadyDrained}},
-						}},
-						bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: bson.D{
-							bson.E{Key: "$in", Value: bson.A{store.Quarantined, store.AlreadyQuarantined}},
-						}},
-					},
+					datastore.D(
+						datastore.E("fullDocument.healtheventstatus.userpodsevictionstatus.status", datastore.D(
+							datastore.E("$in", datastore.A(datastore.StatusSucceeded, datastore.AlreadyDrained)),
+						)),
+						datastore.E("fullDocument.healtheventstatus.nodequarantined", datastore.D(
+							datastore.E("$in", datastore.A(datastore.Quarantined, datastore.AlreadyQuarantined)),
+						)),
+					),
 					// Watch for unquarantine events (for annotation cleanup)
-					bson.D{
-						bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: store.UnQuarantined},
-						bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: store.StatusSucceeded},
-					},
-				}},
-			}},
-		},
+					datastore.D(
+						datastore.E("fullDocument.healtheventstatus.nodequarantined", datastore.UnQuarantined),
+						datastore.E("fullDocument.healtheventstatus.userpodsevictionstatus.status", datastore.StatusSucceeded),
+					),
+				)),
+			)),
+		),
 	}
 }
 
@@ -238,17 +158,30 @@ func run() error {
 		return fmt.Errorf("failed to get required environment variables: %w", err)
 	}
 
-	// Get MongoDB configuration
-	mongoConfig, err := getMongoDBConfig(cfg.mongoClientCertMountPath)
+	// Load datastore configuration
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get MongoDB configuration: %w", err)
+		return fmt.Errorf("failed to load datastore configuration: %w", err)
 	}
 
-	// Get token configuration
-	tokenConfig, err := getTokenConfig()
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
-		return fmt.Errorf("failed to get token configuration: %w", err)
+		return fmt.Errorf("failed to create datastore: %w", err)
 	}
+
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			slog.Error("Failed to close datastore", "error", err)
+		}
+	}()
+
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		return fmt.Errorf("failed to ping datastore: %w", err)
+	}
+
+	slog.Info("Successfully connected to datastore", "provider", datastoreConfig.Provider)
 
 	// Get MongoDB pipeline
 	pipeline := getMongoPipeline()
@@ -269,14 +202,11 @@ func run() error {
 
 	// Initialize and start reconciler
 	reconcilerCfg := reconciler.ReconcilerConfig{
-		MongoConfig:        *mongoConfig,
-		TokenConfig:        *tokenConfig,
-		MongoPipeline:      pipeline,
-		RemediationClient:  k8sClient,
+		DataStore:          dataStore, // Use new datastore abstraction
+		Pipeline:           pipeline,  // Use new pipeline types
+		K8sClient:          k8sClient,
 		StateManager:       statemanager.NewStateManager(clientSet),
 		EnableLogCollector: envCfg.enableLogCollector,
-		UpdateMaxRetries:   cfg.updateMaxRetries,
-		UpdateRetryDelay:   time.Duration(cfg.updateRetryDelaySeconds) * time.Second,
 	}
 
 	reconciler := reconciler.NewReconciler(reconcilerCfg, cfg.dryRun)
@@ -296,22 +226,4 @@ func main() {
 		slog.Error("Fatal error", "error", err)
 		os.Exit(1)
 	}
-}
-
-func getEnvAsInt(name string, defaultValue int) (int, error) {
-	valueStr, exists := os.LookupEnv(name)
-	if !exists {
-		return defaultValue, nil
-	}
-
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return 0, fmt.Errorf("error converting %s to integer: %w", name, err)
-	}
-
-	if value <= 0 {
-		return 0, fmt.Errorf("value of %s must be a positive integer", name)
-	}
-
-	return value, nil
 }

@@ -57,7 +57,7 @@ imagePullSecrets: []
 # Optional pod annotations (fallback if global not available)
 podAnnotations: {}
 
-# Log verbosity level for the main CSP health monitor container (e.g. "debug", "info", "warn", "error")
+# Log level for the CSP health monitor containers (debug, info, warn, error)
 logLevel: info
 
 # Mount path for MongoDB client certificates within the containers

@@ -1,0 +1,88 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NVSentinel Helm Chart Values for PostgreSQL Provider
+# This configuration deploys NVSentinel with PostgreSQL as the datastore
+
+global:
+  # Datastore configuration for PostgreSQL
+  datastore:
+    # Provider selection: "mongodb" or "postgresql"
+    provider: "postgresql"
+
+    # Connection configuration for PostgreSQL
+    connection:
+      host: "postgresql"
+      port: 5432
+      database: "nvsentinel"
+      username: "nvsentinel_user"
+      sslmode: "prefer"
+      # Password should be provided via secret or environment variable
+      # passwordSecret:
+      #   name: "postgresql-credentials"
+      #   key: "password"
+
+    # Provider-specific options
+    options:
+      maxConnections: "25"
+      maxIdleConnections: "10"
+      connectionMaxLifetime: "1h"
+      pollInterval: "5s"  # For change stream polling
+
+# Module enablement (same as default but explicitly configured)
+healthEventsAnalyzer:
+  enabled: true
+
+cspHealthMonitor:
+  enabled: true
+
+faultQuarantine:
+  enabled: true
+
+faultRemediation:
+  enabled: true
+
+nodeDrainer:
+  enabled: true
+
+labeler:
+  enabled: true
+
+# PostgreSQL configuration (optional - can use external PostgreSQL)
+# Uncomment and configure if you want to deploy PostgreSQL as part of NVSentinel
+# postgresql:
+#   enabled: true
+#   auth:
+#     database: "nvsentinel"
+#     username: "nvsentinel_user"
+#     password: "nvsentinel_password"  # Change this!
+#   primary:
+#     persistence:
+#       enabled: true
+#       size: 8Gi
+#     resources:
+#       requests:
+#         memory: 256Mi
+#         cpu: 250m
+#       limits:
+#         memory: 512Mi
+#         cpu: 500m
+
+# MongoDB disabled when using PostgreSQL
+mongodb:
+  enabled: false
+
+# Alternative external PostgreSQL configuration example
+# If using external PostgreSQL, configure the connection above and ensure
+# the PostgreSQL server is accessible from the Kubernetes cluster

@@ -494,6 +494,26 @@ if [[ "${SKIP_TOOLS}" == "false" ]] && command_exists go; then
 fi
 
 # ============================================================================
+# Go gRPC Tools
+# ============================================================================
+if [[ "${SKIP_TOOLS}" == "false" ]] && command_exists go; then
+    echo "════════════════════════════════════════════════════════"
+    log_info "Go gRPC Tools"
+    echo "════════════════════════════════════════════════════════"
+
+    log_info "Installing Go gRPC tools via Makefile..."
+    log_info "This will install: protoc-gen-go, protoc-gen-go-grpc"
+
+    if prompt_continue; then
+        cd "${REPO_ROOT}"
+        make install-protobuf-tools
+        log_success "Go gRPC tools installed"
+    fi
+
+    echo ""
+fi
+
+# ============================================================================
 # Python gRPC Tools
 # ============================================================================
 if [[ "${SKIP_PYTHON}" == "false" ]] && command_exists python3; then

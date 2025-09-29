@@ -36,16 +36,48 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "fault-quarantine-module.serviceAccountName" . }}
+      {{- if eq .Values.global.datastore.provider "postgresql" }}
+      initContainers:
+        - name: fix-cert-permissions
+          image: "docker.io/bitnamilegacy/os-shell:12-debian-12-r30"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+          command:
+            - sh
+            - -c
+            - |
+              echo "Copying PostgreSQL client certificates with correct permissions..."
+              cp /etc/ssl/client-certs-original/tls.crt /etc/ssl/client-certs-fixed/
+              cp /etc/ssl/client-certs-original/ca.crt /etc/ssl/client-certs-fixed/
+              cp /etc/ssl/client-certs-original/tls.key /etc/ssl/client-certs-fixed/
+              chmod 644 /etc/ssl/client-certs-fixed/tls.crt
+              chmod 644 /etc/ssl/client-certs-fixed/ca.crt
+              chmod 600 /etc/ssl/client-certs-fixed/tls.key
+              echo "Certificate permissions fixed:"
+              ls -la /etc/ssl/client-certs-fixed/
+          volumeMounts:
+            - name: postgresql-client-cert-original
+              mountPath: /etc/ssl/client-certs-original
+              readOnly: true
+            - name: client-certs-fixed
+              mountPath: /etc/ssl/client-certs-fixed
+      {{- end }}
       containers:
         - name: fault-quarantine
           image: "{{ ((.Values.global).faultQuarantineModule).image.repository | default "ghcr.io/nvidia/nvsentinel-fault-quarantine-module" }}:{{ ((.Values.global).image).tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ ((.Values.global).faultQuarantineModule).image.pullPolicy | default "IfNotPresent" }}
+          {{- if eq .Values.global.datastore.provider "postgresql" }}
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           args:
-          - "--metrics-port={{ ((.Values.global).metricsPort) | default 2112 }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
-          - "--dry-run={{ ((.Values.global).dryRun) | default false }}"
+          - "--metrics-port={{ .Values.global.metricsPort }}"
+          - "--dry-run={{ .Values.global.dryRun }}"
           - "--circuit-breaker-percentage={{ .Values.circuitBreaker.percentage }}"
           - "--circuit-breaker-duration={{ .Values.circuitBreaker.duration }}"
           - "--circuit-breaker-enabled={{ .Values.circuitBreaker.enabled }}"
@@ -72,9 +104,15 @@ spec:
           - name: config-volume
             mountPath: /etc/config/config.toml
             subPath: config.toml
+          {{- if eq .Values.global.datastore.provider "postgresql" }}
+          - name: client-certs-fixed
+            mountPath: {{ .Values.clientCertMountPath }}
+            readOnly: true
+          {{- else }}
           - name: mongo-app-client-cert
             mountPath: {{ .Values.clientCertMountPath }}
             readOnly: true
+          {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -82,9 +120,16 @@ spec:
                   fieldPath: metadata.namespace
             - name: LOG_LEVEL
               value: "{{ .Values.logLevel }}"
+            {{- if eq .Values.global.datastore.provider "postgresql" }}
+            - name: POSTGRESQL_CLIENT_CERT_MOUNT_PATH
+              value: {{ .Values.clientCertMountPath }}
+            {{- else }}
+            - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+              value: {{ .Values.clientCertMountPath }}
+            {{- end }}
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ if .Values.global.datastore }}{{ .Release.Name }}-datastore-config{{ else }}mongodb-config{{ end }}
                 optional: true
       volumes:
       - name: config-volume
@@ -93,10 +138,19 @@ spec:
           items:
           - key: config.toml
             path: config.toml
+      {{- if eq .Values.global.datastore.provider "postgresql" }}
+      - name: postgresql-client-cert-original
+        secret:
+          secretName: postgresql-client-cert
+          optional: true
+      - name: client-certs-fixed
+        emptyDir: {}
+      {{- else }}
       - name: mongo-app-client-cert
         secret:
           secretName: mongo-app-client-cert-secret
           optional: true
+      {{- end }}
       restartPolicy: Always
       {{- with (((.Values.global).systemNodeSelector) | default .Values.nodeSelector) }}
       nodeSelector:

@@ -16,6 +16,19 @@ global:
   dryRun: false
   kubeVersion: 1.31.0
 
+  # Datastore provider configuration (for database abstraction)
+  datastore:
+    provider: "mongodb"  # Default to MongoDB for backward compatibility
+    connection:
+      host: "mongodb"
+      port: 27017
+      database: "nvsentinel"
+    options:
+      maxConnections: "25"
+      maxIdleConnections: "10"
+      connectionMaxLifetime: "1h"
+      pollInterval: "5s"
+
   nodeSelector: {}
   
   tolerations: 

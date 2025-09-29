@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         datacenter-gpu-manager-4-dev=1:4.2.0 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY gpu-spec.yaml /gpu-spec.yaml
+COPY tilt/dcgm-fake/gpu-spec.yaml /gpu-spec.yaml
 
 ENV NVML_INJECTION_MODE=True
 ENV NVML_YAML_FILE=/gpu-spec.yaml

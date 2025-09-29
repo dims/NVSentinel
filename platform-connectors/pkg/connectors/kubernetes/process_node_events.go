@@ -321,7 +321,13 @@ func (r *K8sConnector) constructHealthEventMessage(healthEvent *platformconnecto
 	return message
 }
 
+//nolint:cyclop // Complex function for processing health events, matches main branch pattern
 func (r *K8sConnector) processHealthEvents(ctx context.Context, healthEvents *platformconnector.HealthEvents) error {
+	// Check for nil healthEvents to prevent panic
+	if healthEvents == nil || healthEvents.Events == nil {
+		return nil
+	}
+
 	var nodeConditions []corev1.NodeCondition
 
 	for _, healthEvent := range healthEvents.Events {

@@ -43,15 +43,15 @@ spec:
       securityContext:
         fsGroup: {{ .Values.podSecurityContext.fsGroup }}
         fsGroupChangePolicy: {{ .Values.podSecurityContext.fsGroupChangePolicy }}
-{{- with (.Values.global.systemNodeSelector | default .Values.nodeSelector) }}
+{{- with (((.Values.global).systemNodeSelector) | default .Values.nodeSelector) }}
       nodeSelector:
 {{ toYaml . | nindent 8 }}
 {{- end }}
-{{- with (.Values.global.affinity | default .Values.affinity) }}
+{{- with (((.Values.global).affinity) | default .Values.affinity) }}
       affinity:
 {{ toYaml . | nindent 8 }}
 {{- end }}
-{{- with (.Values.global.systemNodeTolerations | default .Values.tolerations) }}
+{{- with (((.Values.global).systemNodeTolerations) | default .Values.tolerations) }}
       tolerations:
 {{ toYaml . | nindent 8 }}
 {{- end }}

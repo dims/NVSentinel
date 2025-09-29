@@ -30,22 +30,23 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp"
 	awsclient "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp/aws"
 	gcpclient "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp/gcp"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers"
 )
 
 const (
-	defaultConfigPath    = "/etc/config/config.toml"
-	defaultMongoCertPath = "/etc/ssl/mongo-client"
-	defaultKubeconfig    = ""
-	defaultMetricsPort   = "2112"
-	eventChannelSize     = 100
+	defaultConfigPath  = "/etc/config/config.toml"
+	defaultKubeconfig  = ""
+	defaultMetricsPort = "2112"
+	eventChannelSize   = 100
 )
 
 var (
@@ -54,17 +55,6 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
-
-// main is the entry point for the CSP Health Monitor application.
-func main() {
-	logger.SetDefaultStructuredLogger("csp-health-monitor", version)
-	slog.Info("Starting csp-health-monitor", "version", version, "commit", commit, "date", date)
-
-	if err := run(); err != nil {
-		slog.Error("CSP Health Monitor exited with error", "error", err)
-		os.Exit(1)
-	}
-}
 
 // startActiveMonitorAndLog starts the provided CSP monitor in a new goroutine
 // and logs its lifecycle and any runtime errors.
@@ -102,6 +92,17 @@ func startActiveMonitorAndLog(
 	}()
 }
 
+// main is the entry point for the CSP Health Monitor application.
+func main() {
+	logger.SetDefaultStructuredLogger("csp-health-monitor", version)
+	slog.Info("Starting csp-health-monitor", "version", version, "commit", commit, "date", date)
+
+	if err := run(); err != nil {
+		slog.Error("CSP Health Monitor exited with error", "error", err)
+		os.Exit(1)
+	}
+}
+
 func run() error {
 	configPath := flag.String("config", defaultConfigPath, "Path to the TOML configuration file.")
 	metricsPort := flag.String("metrics-port", defaultMetricsPort, "Port to expose Prometheus metrics on.")
@@ -110,13 +111,10 @@ func run() error {
 		defaultKubeconfig,
 		"Path to a kubeconfig file. Only required if running out-of-cluster.",
 	)
-	mongoClientCertMountPath := flag.String(
-		"mongo-client-cert-mount-path",
-		defaultMongoCertPath,
-		"Directory where MongoDB client tls.crt, tls.key, and ca.crt are mounted.",
-	)
 
 	flag.Parse()
+
+	slog.Info("Starting CSP Health Monitor (Main Container)...")
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
@@ -128,18 +126,24 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := datastore.NewStore(ctx, mongoClientCertMountPath)
+	// Load datastore configuration using the store-client-sdk
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load datastore configuration: %w", err)
+	}
+
+	store, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
 		return fmt.Errorf("failed to initialize datastore: %w", err)
 	}
 
-	slog.Info("Datastore initialized successfully.")
+	slog.Info("Datastore initialized successfully", "provider", datastoreConfig.Provider)
 
 	eventChan := make(chan model.MaintenanceEvent, eventChannelSize)
 	// Processor is lightweight; it already encapsulates required dependencies.
-	eventProcessor, err := eventpkg.NewProcessor(cfg, store)
-	if err != nil {
-		return fmt.Errorf("failed to initialize event processor: %w", err)
+	eventProcessor := eventpkg.NewProcessor(cfg, store)
+	if eventProcessor == nil {
+		return fmt.Errorf("failed to initialize event processor")
 	}
 
 	slog.Info("Event processor initialized successfully.")
@@ -185,7 +189,7 @@ func initActiveMonitor(
 	ctx context.Context,
 	cfg *config.Config,
 	kubeconfigPath string,
-	store datastore.Store,
+	store datastore.DataStore,
 ) csp.Monitor {
 	if cfg.GCP.Enabled {
 		slog.Info("GCP configuration is enabled.")
@@ -214,9 +218,7 @@ func initActiveMonitor(
 			return nil
 		}
 
-		slog.Info("AWS monitor initialized",
-			"account", cfg.AWS.AccountID,
-			"region", cfg.AWS.Region)
+		slog.Info("AWS monitor initialized", "account", cfg.AWS.AccountID, "region", cfg.AWS.Region)
 
 		return awsMonitor
 	}
@@ -240,7 +242,7 @@ func startMetricsServer(port string) {
 		IdleTimeout:  15 * time.Second,
 	}
 
-	slog.Info("Metrics server (main monitor) starting to listen", "metrics", listenAddress)
+	slog.Info("Metrics server (main monitor) starting to listen", "address", listenAddress+"/metrics")
 
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("Metrics server (main monitor) failed", "error", err)
@@ -270,7 +272,7 @@ func runEventProcessorLoop(
 			}
 
 			metrics.MainEventsReceived.WithLabelValues(string(receivedEvent.CSP)).Inc()
-			slog.Info("Processor received event",
+			slog.Debug("Processor received event",
 				"eventID", receivedEvent.EventID,
 				"csp", receivedEvent.CSP,
 				"node", receivedEvent.NodeName,
@@ -283,17 +285,14 @@ func runEventProcessorLoop(
 
 			if err != nil {
 				metrics.MainProcessingErrors.WithLabelValues(string(receivedEvent.CSP), "process_event").Inc()
-				slog.Error(
-					"Error processing event",
+				slog.Error("Error processing event",
 					"eventID", receivedEvent.EventID,
 					"node", receivedEvent.NodeName,
 					"error", err,
 				)
 			} else {
 				metrics.MainEventsProcessedSuccess.WithLabelValues(string(receivedEvent.CSP)).Inc()
-				slog.Debug("Successfully processed event",
-					"eventID", receivedEvent.EventID,
-				)
+				slog.Debug("Successfully processed event", "eventID", receivedEvent.EventID)
 			}
 		}
 	}

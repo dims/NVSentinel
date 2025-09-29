@@ -54,6 +54,8 @@ all: lint-test
 # =============================================================================
 # MODULE-SPECIFIC OVERRIDES
 # =============================================================================
+# Note: The following targets intentionally override the ones from ../make/go.mk
+# to provide module-specific behavior. Makefile warnings about this are expected.
 
 # Override test target to exclude protobuf packages and set up envtest
 .PHONY: test

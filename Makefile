@@ -142,7 +142,7 @@ dev-env-setup: ## Setup complete development environment (installs all required 
 
 # Install lint tools
 .PHONY: install-lint-tools
-install-lint-tools: install-golangci-lint install-gotestsum install-gocover-cobertura ## Install all lint tools (golangci-lint, gotestsum, gocover-cobertura)
+install-lint-tools: install-golangci-lint install-gotestsum install-gocover-cobertura install-addlicense ## Install all lint tools (golangci-lint, gotestsum, gocover-cobertura, addlicense)
 	@echo "All lint tools installed successfully"
 	@echo ""
 	@echo "=== Installed Tool Versions and Locations ==="
@@ -165,6 +165,12 @@ install-lint-tools: install-golangci-lint install-gotestsum install-gocover-cobe
 		echo "    Location: $$(which gocover-cobertura)"; \
 	else \
 		echo "gocover-cobertura: not found"; \
+	fi
+	@if command -v addlicense >/dev/null 2>&1; then \
+		echo "addlicense: installed (no version command available)"; \
+		echo "    Location: $$(which addlicense)"; \
+	else \
+		echo "addlicense: not found"; \
 	fi
 	@echo "=============================================="
 
@@ -209,6 +215,72 @@ install-gocover-cobertura:
 	else \
 		echo "gocover-cobertura is already installed"; \
 	fi
+
+# Install addlicense
+.PHONY: install-addlicense
+install-addlicense:
+	@echo "Installing addlicense..."
+	@if ! command -v addlicense >/dev/null 2>&1; then \
+		echo "addlicense not found, installing..."; \
+		$(GO) install github.com/google/addlicense@$(ADDLICENSE_VERSION); \
+	else \
+		echo "addlicense is already installed"; \
+	fi
+
+# Install protoc-gen-go
+.PHONY: install-protoc-gen-go
+install-protoc-gen-go:
+	@echo "Installing protoc-gen-go $(PROTOC_GEN_GO_VERSION)..."
+	@if ! command -v protoc-gen-go >/dev/null 2>&1; then \
+		echo "protoc-gen-go not found, installing..."; \
+		$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION); \
+	else \
+		current_version=$$(protoc-gen-go --version 2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "unknown"); \
+		if [ "$$current_version" = "$(PROTOC_GEN_GO_VERSION)" ]; then \
+			echo "protoc-gen-go $(PROTOC_GEN_GO_VERSION) is already installed"; \
+		else \
+			echo "Updating protoc-gen-go from $$current_version to $(PROTOC_GEN_GO_VERSION)..."; \
+			$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION); \
+		fi; \
+	fi
+
+# Install protoc-gen-go-grpc
+.PHONY: install-protoc-gen-go-grpc
+install-protoc-gen-go-grpc:
+	@echo "Installing protoc-gen-go-grpc $(PROTOC_GEN_GO_GRPC_VERSION)..."
+	@if ! command -v protoc-gen-go-grpc >/dev/null 2>&1; then \
+		echo "protoc-gen-go-grpc not found, installing..."; \
+		$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION); \
+	else \
+		current_version=$$(protoc-gen-go-grpc --version 2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "unknown"); \
+		if [ "$$current_version" = "$(PROTOC_GEN_GO_GRPC_VERSION)" ]; then \
+			echo "protoc-gen-go-grpc $(PROTOC_GEN_GO_GRPC_VERSION) is already installed"; \
+		else \
+			echo "Updating protoc-gen-go-grpc from $$current_version to $(PROTOC_GEN_GO_GRPC_VERSION)..."; \
+			$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION); \
+		fi; \
+	fi
+
+# Install all Protocol Buffer tools (protoc plugins)
+.PHONY: install-protobuf-tools
+install-protobuf-tools: install-protoc-gen-go install-protoc-gen-go-grpc ## Install Protocol Buffer code generation tools (protoc-gen-go, protoc-gen-go-grpc)
+	@echo ""
+	@echo "All Protocol Buffer tools installed successfully"
+	@echo ""
+	@echo "=== Installed Protobuf Tool Versions ==="
+	@if command -v protoc-gen-go >/dev/null 2>&1; then \
+		echo "protoc-gen-go: $$(protoc-gen-go --version 2>/dev/null)"; \
+		echo "    Location: $$(which protoc-gen-go)"; \
+	else \
+		echo "protoc-gen-go: not found"; \
+	fi
+	@if command -v protoc-gen-go-grpc >/dev/null 2>&1; then \
+		echo "protoc-gen-go-grpc: $$(protoc-gen-go-grpc --version 2>/dev/null)"; \
+		echo "    Location: $$(which protoc-gen-go-grpc)"; \
+	else \
+		echo "protoc-gen-go-grpc: not found"; \
+	fi
+	@echo "=========================================="
 
 # Install Go $(GO_VERSION) for CI environments (Linux and macOS, amd64 and arm64)
 .PHONY: install-go-ci
@@ -388,6 +460,15 @@ go-mod-tidy-all: ## Run go mod tidy in all directories with go.mod files
 		(cd "$$dir" && go mod tidy) || exit 1; \
 	done
 	@echo "go mod tidy completed in all modules"
+
+# Lint all Go modules
+.PHONY: go-lint-all
+go-lint-all:
+	@echo "Running lint and tests for non-health-monitor Go modules..."
+	@for module in $(shell echo "$(GO_MODULES)" | tr ' ' '\n'); do \
+		echo "Processing $$module..."; \
+		$(MAKE) -C $$module lint || exit 1; \
+	done
 
 # Lint and test non-health-monitor Go modules
 .PHONY: go-lint-test-all
@@ -678,7 +759,9 @@ tilt-ci: ## Run Tilt in CI mode (no UI, waits for all resources)
 		echo "Error: tilt is not installed. Please install from https://tilt.dev/"; \
 		exit 1; \
 	fi
-	tilt ci -f tilt/Tiltfile
+	@TILTFILE_PATH=$${TILTFILE:-tilt/Tiltfile}; \
+	echo "Using Tiltfile: $$TILTFILE_PATH"; \
+	tilt ci -f $$TILTFILE_PATH
 	@echo "Waiting for all deployments to be ready..."
 	@kubectl get deployments --all-namespaces --no-headers -o custom-columns=":metadata.namespace,:metadata.name" | while read ns name; do \
 		echo "Waiting for deployment $$name in namespace $$ns..."; \

@@ -21,27 +21,42 @@ global:
 
   # Default port for Prometheus metrics endpoint across all components
   metricsPort: 2112
-  
+
+  # Datastore configuration - supports pluggable backends (mongodb, postgresql)
+  # Environment-specific values files can override these defaults
+  datastore:
+    provider: "mongodb"  # Default to MongoDB for backward compatibility
+    connection:
+      host: "mongodb-service"  # Default MongoDB service name
+      port: 27017
+      database: "nvsentinel"
+      # Optional fields (can be overridden in environment-specific values files):
+      # username: ""
+      # sslmode: ""  # For PostgreSQL: disable, require, verify-ca, verify-full
+      # sslcert: ""
+      # sslkey: ""
+      # sslrootcert: ""
+
   # Node selector for global components - used to constrain pods to nodes with specific labels
   # Example: kubernetes.io/hostname: specific-node
   nodeSelector: {}
-  
+
   # Tolerations for global workloads - allows pods to schedule on nodes with matching taints
   # Example: - key: "nvidia.com/gpu", operator: "Exists", effect: "NoSchedule"
   tolerations: []
-  
+
   # Affinity rules for global workloads - defines pod scheduling preferences and requirements
   # Example: podAntiAffinity to spread pods across nodes
   affinity: {}
-  
+
   # Additional annotations to apply to all pods
   # Example: prometheus.io/scrape: "true"
   podAnnotations: {}
-  
+
   # Node selector for control plane components (platform-connectors, monitoring services)
   # Used to schedule critical infrastructure components on specific nodes
   systemNodeSelector: {}
-  
+
   # Tolerations for system-level components
   # Allows system pods to run on tainted nodes where regular workloads cannot
   systemNodeTolerations: []
@@ -69,11 +84,11 @@ global:
       repository: ghcr.io/nvidia/nvsentinel-gpu-health-monitor
       # Image pull policy (IfNotPresent, Always, Never)
       pullPolicy: IfNotPresent
-    
+
     # Use host networking for GPU health monitor pods
     # Required for accessing host-level GPU metrics
     useHostNetworking: false
-    
+
     # BusyBox image used for init containers and helper tasks
     busybox:
       image:
@@ -130,14 +145,15 @@ global:
       repository: ghcr.io/nvidia/nvsentinel-janitor
       pullPolicy: IfNotPresent
 
-  # CSP Health Monitor - monitors cloud service provider maintenance events
+  # CSP Health Monitor - monitors cloud service provider specific health metrics
   cspHealthMonitor:
-    # Enable CSP health monitor (for AWS, GCP, Azure maintenance notifications)
+    # Enable CSP health monitor component
     enabled: false
 
     image:
       # Container image repository for CSP health monitor
       repository: ghcr.io/nvidia/nvsentinel-csp-health-monitor
+      # Image pull policy (IfNotPresent, Always, Never)
       pullPolicy: IfNotPresent
 
   # Syslog Health Monitor - monitors system logs for hardware errors and failures
@@ -148,14 +164,15 @@ global:
     image:
       # Container image repository for syslog health monitor
       repository: ghcr.io/nvidia/nvsentinel-syslog-health-monitor
+      # Image pull policy (IfNotPresent, Always, Never)
       pullPolicy: IfNotPresent
 
-    # XID (GPU error) analyzer sidecar configuration
+    # XID error detection sidecar configuration
     xidSideCar:
-      # Enable XID analyzer sidecar for enhanced GPU error analysis
+      # Enable XID error detection sidecar component
       enabled: false
 
-  # Labeler Module - applies labels to nodes based on GPU operator's operands which determine the components of NVSentinel enabled on a node
+  # Labeler Module - applies labels to nodes based on health status and characteristics
   labeler:
     # Enable labeler module
     enabled: true
@@ -163,47 +180,50 @@ global:
     image:
       # Container image repository for labeler module
       repository: ghcr.io/nvidia/nvsentinel-labeler-module
+      # Image pull policy (IfNotPresent, Always, Never)
       pullPolicy: IfNotPresent
 
   # Image pull secrets for accessing private container registries
-  # Must be created in the namespace before deploying NVSentinel
+  # Used to authenticate with NVIDIA GPU Cloud (NGC) registry
   imagePullSecrets:
     - name: nvidia-ngcuser-pull-secret
 
-  # MongoDB Store configuration - provides persistent storage for health events and state
+  # MongoDB Store configuration - utility images for MongoDB operations
   mongodbStore:
-    # Helper images for MongoDB operations
+    # Utility images for MongoDB management and operations
     images:
-      # kubectl image for Kubernetes operations in init containers
+      # Kubectl image for Kubernetes operations in MongoDB setup
       kubectl:
         repository: docker.io/bitnamilegacy/kubectl
         tag: "1.30.6"
         pullPolicy: IfNotPresent
-      # mongosh image for MongoDB shell operations
+      # MongoDB shell image for database operations and maintenance
       mongosh:
         repository: ghcr.io/rtsp/docker-mongosh
         tag: "2.5.2"
         pullPolicy: IfNotPresent
 
-  # In-cluster File Server - stores log files
+  # In-cluster File Server - provides file serving capabilities within the cluster
   inclusterFileServer:
-    # Enable in-cluster file server for log collection
+    # Enable in-cluster file server component
     enabled: false
-    # Prometheus metrics port for file server
+    # Metrics port for file server metrics endpoint
     metricsPort: 9001
-    # Prometheus metrics port for cleanup service
+    # Metrics port for cleanup service metrics endpoint
     cleanupMetricsPort: 9002
 
-  # Kata Containers integration - for enhanced security isolation
+  # Kata Containers integration - secure container runtime using lightweight VMs
   kata:
-    # Enable Kata Containers runtime support
+    # Enable Kata Containers integration
     enabled: false
 
-# Platform Connector configuration - central communication hub for all health monitors
+# Platform Connector configuration - core component that interfaces with various platform services
 platformConnector:
+  # Container image configuration
   image:
-    # Container image repository for platform connector
+    # Container image repository for platform connectors
     repository: ghcr.io/nvidia/nvsentinel-platform-connectors
+    # Image pull policy (IfNotPresent, Always, Never)
     pullPolicy: IfNotPresent
 
   # Resource limits and requests for platform connector pods
@@ -221,62 +241,74 @@ platformConnector:
 
   # Security context for platform connector containers
   securityContext:
-    # Run as root user (required for system-level operations)
+    # Run as root user (required for certain platform operations)
     runAsUser: 0
-    # Drop all Linux capabilities except those explicitly needed
     capabilities:
+      # Drop all capabilities for enhanced security
       drop:
       - ALL
+
+  # Prometheus metrics endpoint port
+  metricsPort: 2112
+
+  # Log level for platform connector (debug, info, warn, error)
+  logLevel: info
 
   # MongoDB store configuration for platform connector
   mongodbStore:
     # Enable MongoDB store integration
     enabled: false
-    # Path where MongoDB client certificates are mounted
+    # Mount path for MongoDB client certificates
     clientCertMountPath: "/etc/ssl/mongo-client"
 
-  # Pod-level security context
+  # Pod security context configuration (empty by default)
   podSecurityContext: {}
 
-  # DaemonSet update strategy (RollingUpdate or OnDelete)
+  # Deployment update strategy
   updateStrategy: RollingUpdate
-  # Maximum percentage of unavailable pods during rolling updates
+  # Maximum percentage of unavailable pods during updates
   maxUnavailable: 5%
 
-  # Kubernetes connector configuration - integrates with Kubernetes API
+  # Kubernetes connector configuration
   k8sConnector:
-    # Enable Kubernetes API integration
+    # Enable Kubernetes connector component
     enabled: true
-    # Query per second limit for Kubernetes API requests
+    # Queries per second rate limit for Kubernetes API calls
     qps: 5.0
-    # Burst limit for Kubernetes API requests
+    # Burst limit for Kubernetes API calls
     burst: 10
 
-# Override the name of the Helm release
+# Helm chart name overrides
+# Override for the chart name (defaults to chart name if empty)
 nameOverride: ""
-# Override the full name of the Helm release
+# Override for the full resource names (defaults to release name + chart name if empty)
 fullnameOverride: ""
 
 # Service account configuration for NVSentinel components
 serviceAccount:
-  # Create a service account
+  # Create a service account for NVSentinel (recommended)
   create: true
-  # Additional annotations for the service account
+  # Additional annotations to apply to the service account
   annotations: {}
-  # Name of the service account (generated if empty)
+  # Service account name (defaults to fullname template if empty)
   name: ""
 
-# Additional pod annotations (merged with global.podAnnotations)
+# Additional annotations to apply to NVSentinel pods
+# Example: prometheus.io/scrape: "true"
 podAnnotations: {}
 
-# Node selector for platform connector pods (overrides global.systemNodeSelector if set)
+# Node selector for pod placement - used to constrain pods to nodes with specific labels
+# Example: kubernetes.io/hostname: specific-node
 nodeSelector: {}
 
-# Tolerations for platform connector pods (merged with global.systemNodeTolerations)
+# Tolerations for pod scheduling - allows pods to schedule on nodes with matching taints
+# Example: - key: "nvidia.com/gpu", operator: "Exists", effect: "NoSchedule"
 tolerations: []
 
-# Affinity rules for platform connector pods
+# Affinity rules for pod scheduling - defines pod placement preferences and requirements
+# Example: podAntiAffinity to spread pods across nodes
 affinity: {}
 
-# Unix socket path for inter-component communication
+# Socket path for NVSentinel component communication
+# Used for inter-component communication within the cluster
 socketPath: "/var/run/nvsentinel.sock"

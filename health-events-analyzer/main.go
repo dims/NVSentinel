@@ -21,19 +21,17 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -55,86 +53,25 @@ func main() {
 	}
 }
 
-func loadMongoConfig(mongoClientCertMountPath string) (storewatcher.MongoDBConfig, error) {
-	mongoURI := os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("MONGODB_URI is not set")
-	}
-
-	mongoDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if mongoDatabase == "" {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("MONGODB_DATABASE_NAME is not set")
-	}
-
-	mongoCollection := os.Getenv("MONGODB_COLLECTION_NAME")
-	if mongoCollection == "" {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("MONGODB_COLLECTION_NAME is not set")
-	}
-
-	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
+func loadDatastoreConfig(ctx context.Context) (datastore.DataStore, *datastore.DataStoreConfig, error) {
+	// Load datastore configuration using the abstraction layer
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %w", err)
+		return nil, nil, fmt.Errorf("failed to load datastore configuration: %w", err)
 	}
 
-	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid MONGODB_PING_INTERVAL_SECONDS: %w", err)
+		return nil, nil, fmt.Errorf("failed to create datastore: %w", err)
 	}
 
-	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %w", err)
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		return nil, nil, fmt.Errorf("failed to ping datastore: %w", err)
 	}
 
-	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid CA_CERT_READ_INTERVAL_SECONDS: %w", err)
-	}
-
-	return storewatcher.MongoDBConfig{
-		URI:        mongoURI,
-		Database:   mongoDatabase,
-		Collection: mongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    totalTimeoutSeconds,
-		TotalPingIntervalSeconds:   intervalSeconds,
-		TotalCACertTimeoutSeconds:  totalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: intervalCACertSeconds,
-	}, nil
-}
-
-func loadTokenConfig() (storewatcher.TokenConfig, error) {
-	tokenDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		return storewatcher.TokenConfig{}, fmt.Errorf("MONGODB_DATABASE_NAME is not set")
-	}
-
-	tokenCollection := os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		return storewatcher.TokenConfig{}, fmt.Errorf("MONGODB_TOKEN_COLLECTION_NAME is not set")
-	}
-
-	return storewatcher.TokenConfig{
-		ClientName:      "health-events-analyzer",
-		TokenDatabase:   tokenDatabase,
-		TokenCollection: tokenCollection,
-	}, nil
-}
-
-func createPipeline() mongo.Pipeline {
-	return mongo.Pipeline{
-		bson.D{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: "insert"},
-				{Key: "fullDocument.healthevent.isfatal", Value: false},
-				{Key: "fullDocument.healthevent.ishealthy", Value: false},
-			}},
-		},
-	}
+	return dataStore, datastoreConfig, nil
 }
 
 func connectToPlatform(socket string) (*publisher.PublisherConfig, *grpc.ClientConn, error) {
@@ -149,6 +86,18 @@ func connectToPlatform(socket string) (*publisher.PublisherConfig, *grpc.ClientC
 	pub := publisher.NewPublisher(platformConnectorClient)
 
 	return pub, conn, nil
+}
+
+func createPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "insert"),
+				datastore.E("fullDocument.healthevent.isfatal", false),
+				datastore.E("fullDocument.healthevent.ishealthy", false),
+			)),
+		),
+	}
 }
 
 func startMetricsServer(metricsPort string) {
@@ -176,20 +125,20 @@ func run() error {
 	metricsPort := flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
 	socket := flag.String("socket", "unix:///var/run/nvsentinel.sock", "unix domain socket")
 
-	mongoClientCertMountPath := flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
-
 	flag.Parse()
 
-	mongoConfig, err := loadMongoConfig(*mongoClientCertMountPath)
+	dataStore, datastoreConfig, err := loadDatastoreConfig(ctx)
 	if err != nil {
 		return err
 	}
 
-	tokenConfig, err := loadTokenConfig()
-	if err != nil {
-		return err
-	}
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			slog.Error("Failed to close datastore", "error", err)
+		}
+	}()
+
+	slog.Info("Successfully connected to datastore", "provider", datastoreConfig.Provider)
 
 	pipeline := createPipeline()
 
@@ -205,12 +154,15 @@ func run() error {
 		return fmt.Errorf("error loading TOML config: %w", err)
 	}
 
+	// Get collection name from environment (with defaults)
+	collection := getEnvWithDefault("DATASTORE_COLLECTION_NAME", "HealthEvents")
+
 	reconcilerCfg := reconciler.HealthEventsAnalyzerReconcilerConfig{
-		MongoHealthEventCollectionConfig: mongoConfig,
-		TokenConfig:                      tokenConfig,
-		MongoPipeline:                    pipeline,
-		HealthEventsAnalyzerRules:        tomlConfig,
-		Publisher:                        pub,
+		DataStore:                 dataStore, // Use new datastore abstraction
+		Pipeline:                  pipeline,  // Use new pipeline types
+		HealthEventsAnalyzerRules: tomlConfig,
+		Publisher:                 pub,
+		CollectionName:            collection,
 	}
 
 	rec := reconciler.NewReconciler(reconcilerCfg)
@@ -222,20 +174,11 @@ func run() error {
 	return nil
 }
 
-func getEnvAsInt(name string, defaultValue int) (int, error) {
-	valueStr, exists := os.LookupEnv(name)
-	if !exists {
-		return defaultValue, nil
+// getEnvWithDefault returns the environment variable value or a default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return 0, fmt.Errorf("error converting %s to integer: %w", name, err)
-	}
-
-	if value <= 0 {
-		return 0, fmt.Errorf("value of %s must be a positive integer", name)
-	}
-
-	return value, nil
+	return defaultValue
 }

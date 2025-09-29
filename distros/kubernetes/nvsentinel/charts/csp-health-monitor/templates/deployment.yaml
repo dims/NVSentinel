@@ -58,13 +58,12 @@ spec:
           command: ["/app/csp-health-monitor"]
           args:
           - "--config=/etc/config/config.toml"
-          - "--metrics-port={{ ((.Values.global).metricsPort) | default 2112 }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
+          - "--metrics-port={{ .Values.global.metricsPort }}"
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           ports:
             - name: metrics
-              containerPort: {{ ((.Values.global).metricsPort) | default 2112 }}
+              containerPort: {{ .Values.global.metricsPort }}
               protocol: TCP
           volumeMounts:
           - name: config-volume
@@ -77,7 +76,7 @@ spec:
               value: "{{ .Values.logLevel }}"
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ if .Values.global.datastore }}{{ .Release.Name }}-datastore-config{{ else }}mongodb-config{{ end }}
                 optional: true
 
         - name: maintenance-notifier
@@ -88,7 +87,6 @@ spec:
           command: ["/app/maintenance-notifier"]
           args:
           - "--config=/etc/config/config.toml"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "--uds-path={{ .Values.udsPath }}"
           - "--metrics-port={{ .Values.quarantineTriggerEngine.metricsPort }}"
           resources:
@@ -110,7 +108,7 @@ spec:
               value: "{{ .Values.quarantineTriggerEngine.logLevel | default .Values.logLevel }}"
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ if .Values.global.datastore }}{{ .Release.Name }}-datastore-config{{ else }}mongodb-config{{ end }}
                 optional: true
       restartPolicy: Always
       {{- with (((.Values.global).systemNodeSelector) | default .Values.nodeSelector) }}

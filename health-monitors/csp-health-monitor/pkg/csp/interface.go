@@ -17,7 +17,7 @@ package csp
 import (
 	"context"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 )
 
 // Monitor defines the methods a CSP client must implement.

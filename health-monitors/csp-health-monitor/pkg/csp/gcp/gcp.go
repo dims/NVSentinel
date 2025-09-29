@@ -21,11 +21,11 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"cloud.google.com/go/logging"
 	"cloud.google.com/go/logging/logadmin"
@@ -74,7 +74,7 @@ type Client struct {
 // to the current time.
 func getInitialPollStartTime(
 	ctx context.Context,
-	store datastore.Store,
+	store datastore.DataStore,
 	clusterName string,
 	nowUTC time.Time,
 ) time.Time {
@@ -84,7 +84,7 @@ func getInitialPollStartTime(
 		return nowUTC
 	}
 
-	lastProcessedEventTS, found, errDb := store.GetLastProcessedEventTimestampByCSP(
+	lastProcessedEventTS, found, errDb := store.MaintenanceEventStore().GetLastProcessedEventTimestampByCSP(
 		ctx,
 		clusterName,
 		model.CSPGCP,
@@ -134,7 +134,7 @@ func NewClient(
 	cfg config.GCPConfig,
 	clusterName string,
 	kubeconfigPath string,
-	store datastore.Store,
+	store datastore.DataStore,
 ) (*Client, error) {
 	if !cfg.Enabled {
 		slog.Info("GCP Client: Monitoring is disabled in configuration. Client initialization aborted.")

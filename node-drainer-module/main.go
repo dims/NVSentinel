@@ -19,12 +19,19 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
-	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/initializer"
+	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/config"
+	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/reconciler"
+	"github.com/nvidia/nvsentinel/statemanager"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers" // Register all datastore providers
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -48,82 +55,116 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	metricsPort := flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
+	var metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
 
-	mongoClientCertMountPath := flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
+	// Legacy MongoDB flag - kept for backward compatibility but ignored
+	var _ = flag.String(
+		"mongo-client-cert-mount-path", "",
+		"DEPRECATED: MongoDB client cert mount path (ignored, use datastore abstraction instead)",
+	)
 
-	kubeconfigPath := flag.String("kubeconfig-path", "", "path to kubeconfig file")
+	var kubeconfigPath = flag.String("kubeconfig-path", "", "path to kubeconfig file")
 
-	tomlConfigPath := flag.String("config-path", "/etc/config/config.toml",
+	var tomlConfigPath = flag.String("config-path", "/etc/config/config.toml",
 		"path where the node drainer config file is present")
 
-	dryRun := flag.Bool("dry-run", false, "flag to run node drainer module in dry-run mode")
+	var dryRun = flag.Bool("dry-run", false, "flag to run node drainer module in dry-run mode")
 
 	flag.Parse()
 
-	slog.Info("Mongo client cert", "path", *mongoClientCertMountPath)
-
-	params := initializer.InitializationParams{
-		MongoClientCertMountPath: *mongoClientCertMountPath,
-		KubeconfigPath:           *kubeconfigPath,
-		TomlConfigPath:           *tomlConfigPath,
-		MetricsPort:              *metricsPort,
-		DryRun:                   *dryRun,
-	}
-
-	components, err := initializer.InitializeAll(ctx, params)
-	if err != nil {
-		return fmt.Errorf("failed to initialize components: %w", err)
-	}
-
-	// Informers must sync before processing events
-	slog.Info("Starting Kubernetes informers")
-
-	if err := components.Informers.Run(ctx); err != nil {
-		return fmt.Errorf("failed to start informers: %w", err)
-	}
-
-	slog.Info("Kubernetes informers started and synced")
-
-	slog.Info("Starting queue worker")
-	components.QueueManager.Start(ctx)
-
-	slog.Info("Starting MongoDB event watcher")
-
-	criticalError := make(chan error)
+	// Start metrics server
+	slog.Info("Starting metrics server", "port", *metricsPort)
 
 	go func() {
-		if err := components.EventWatcher.Start(ctx); err != nil {
-			slog.Error("Event watcher failed", "error", err)
-			criticalError <- err
+		http.Handle("/metrics", promhttp.Handler())
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
+		err := http.ListenAndServe(":"+*metricsPort, nil)
+		if err != nil {
+			slog.Error("Failed to start metrics server", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	slog.Info("All components started successfully")
+	slog.Info("Metrics server goroutine started")
 
-	if err := initializer.StartMetricsServer(*metricsPort); err != nil {
-		return fmt.Errorf("failed to start metrics server: %w", err)
+	// Load datastore configuration
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load datastore configuration: %w", err)
 	}
 
-	select {
-	case <-ctx.Done():
-	case err := <-criticalError:
-		slog.Error("Critical component failure", "error", err)
-		stop() // Cancel context to trigger shutdown
-
-		return fmt.Errorf("critical component failure: %w", err)
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create datastore: %w", err)
 	}
 
-	slog.Info("Shutting down node drainer")
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			slog.Error("Failed to close datastore", "error", err)
+		}
+	}()
 
-	if err := components.EventWatcher.Stop(); err != nil {
-		return fmt.Errorf("failed to stop event watcher: %w", err)
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		return fmt.Errorf("failed to ping datastore: %w", err)
 	}
 
-	components.QueueManager.Shutdown()
+	slog.Info("Successfully connected to datastore", "provider", datastoreConfig.Provider)
 
-	slog.Info("Node drainer stopped")
+	tomlCfg, err := config.LoadTomlConfig(*tomlConfigPath)
+	if err != nil {
+		return fmt.Errorf("error while loading the toml config: %w", err)
+	}
+
+	if *dryRun {
+		slog.Info("Running in dry-run mode")
+	}
+
+	// Initialize the k8s client with pod timeout configuration
+	k8sClient, clientSet, err := reconciler.NewNodeDrainerClient(*kubeconfigPath, *dryRun, &tomlCfg.NotReadyTimeoutMinutes)
+	if err != nil {
+		return fmt.Errorf("error while initializing kubernetes client: %w", err)
+	}
+
+	slog.Info("Successfully initialized k8sclient")
+
+	// Create pipeline to watch for UPDATE events where nodequarantined changes
+	pipeline := createNodeDrainerPipeline()
+
+	reconcilerCfg := reconciler.ReconcilerConfig{
+		TomlConfig:   *tomlCfg,
+		DataStore:    dataStore,
+		Pipeline:     pipeline,
+		K8sClient:    k8sClient,
+		StateManager: statemanager.NewStateManager(clientSet),
+	}
+
+	reconciler := reconciler.NewReconciler(reconcilerCfg, *dryRun)
+	reconciler.Start(ctx)
 
 	return nil
+}
+
+// createNodeDrainerPipeline creates a database-agnostic aggregation pipeline that filters
+// change stream events to only include UPDATE operations where nodequarantined changes.
+// Note: The MongoDB update sets flat fields (not nested), so we match "nodeQuarantined"
+// not "healtheventstatus.nodequarantined"
+// See store-client-sdk/pkg/datastore/providers/mongodb/datastore.go:666
+func createNodeDrainerPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "update"),
+				datastore.E("$or", datastore.A(
+					datastore.D(datastore.E("updateDescription.updatedFields.nodeQuarantined", datastore.Quarantined)),
+					datastore.D(datastore.E("updateDescription.updatedFields.nodeQuarantined", datastore.UnQuarantined)),
+				)),
+			)),
+		),
+	}
 }

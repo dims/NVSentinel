@@ -5,6 +5,9 @@ dependencies:
 - name: mongodb-store
   repository: ""
   version: 0.1.0
+- name: postgresql
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 15.5.38
 - name: fault-quarantine
   repository: ""
   version: 0.1.0
@@ -29,5 +32,8 @@ dependencies:
 - name: labeler
   repository: ""
   version: 0.1.0
-digest: sha256:c10f6e7fdb0b99a47f38e210c25e610da182c94fe32d89753a34352d12c0bb22
-generated: "2025-10-15T10:37:19.739789+05:30"
+- name: janitor
+  repository: ""
+  version: 0.1.0
+digest: sha256:7ec3769155d030d0796750af25496a19b65aad1e2986c5b6ed5e4194e0db16d7
+generated: "2025-10-26T19:10:41.100751-04:00"

@@ -20,10 +20,9 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-
 	"cloud.google.com/go/logging"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	auditpb "google.golang.org/genproto/googleapis/cloud/audit"
 	"google.golang.org/protobuf/types/known/structpb"
 )

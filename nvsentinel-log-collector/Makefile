@@ -132,10 +132,11 @@ docker-build-local: setup-buildx docker-build-local-log-collector docker-build-l
 .PHONY: docker-build-local-log-collector
 docker-build-local-log-collector: setup-buildx
 	@echo "Building Docker image for log-collector (local, no remote cache)..."
-	docker buildx build \
+	cd $(REPO_ROOT) && docker buildx build \
 		--platform $(PLATFORMS) \
 		--network=host \
 		$(DOCKER_LOAD_ARG) \
+		-f $(MODULE_PATH)/Dockerfile \
 		-t log-collector:local \
 		.
 
@@ -143,11 +144,11 @@ docker-build-local-log-collector: setup-buildx
 .PHONY: docker-build-local-file-server-cleanup
 docker-build-local-file-server-cleanup: setup-buildx
 	@echo "Building Docker image for file-server-cleanup (local, no remote cache)..."
-	docker buildx build \
+	cd $(REPO_ROOT) && docker buildx build \
 		--platform $(PLATFORMS) \
 		--network=host \
 		$(DOCKER_LOAD_ARG) \
-		-f Dockerfile.cleanup \
+		-f $(MODULE_PATH)/Dockerfile.cleanup \
 		-t file-server-cleanup:local \
 		.
 

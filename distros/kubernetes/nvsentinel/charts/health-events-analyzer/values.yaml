@@ -37,6 +37,7 @@ serviceAccount:
 
 clientCertMountPath: "/etc/ssl/mongo-client"
 
+# Log level for the health events analyzer (debug, info, warn, error)
 logLevel: info
 
 config: |
