@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -30,11 +29,15 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+
+	// Datastore abstraction
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+
+	// Import all providers to ensure registration
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 var (
@@ -43,6 +46,37 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
+
+// getEnvWithDefault returns the environment variable value or a default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// loadMetricUpdateInterval loads the metric update interval from environment
+func loadMetricUpdateInterval() (int, error) {
+	unprocessedEventsMetricUpdateIntervalSeconds, err := getEnvAsInt("UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS", 25)
+	if err != nil {
+		return 0, fmt.Errorf("invalid UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: %w", err)
+	}
+	return unprocessedEventsMetricUpdateIntervalSeconds, nil
+}
+
+func getEnvAsInt(name string, defaultValue int) (int, error) {
+	valueStr, exists := os.LookupEnv(name)
+	if !exists {
+		return defaultValue, nil
+	}
+
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return 0, fmt.Errorf("error parsing %s: %w", name, err)
+	}
+
+	return value, nil
+}
 
 func main() {
 	logger.SetDefaultStructuredLogger("fault-quarantine-module", version)
@@ -54,12 +88,9 @@ func main() {
 	}
 }
 
-func parseFlags() (metricsPort, mongoClientCertMountPath, kubeconfigPath *string, dryRun, circuitBreakerEnabled *bool,
+func parseFlags() (metricsPort, kubeconfigPath *string, dryRun, circuitBreakerEnabled *bool,
 	circuitBreakerPercentage *int, circuitBreakerDuration *time.Duration) {
 	metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
-
-	mongoClientCertMountPath = flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
 
 	kubeconfigPath = flag.String("kubeconfig-path", "", "path to kubeconfig file")
 
@@ -79,103 +110,19 @@ func parseFlags() (metricsPort, mongoClientCertMountPath, kubeconfigPath *string
 	return
 }
 
-func loadEnvConfig() (namespace, mongoURI, mongoDatabase, mongoCollection, tokenDatabase, tokenCollection string,
-	err error) {
-	namespace = os.Getenv("POD_NAMESPACE")
-	if namespace == "" {
-		return "", "", "", "", "", "", fmt.Errorf("POD_NAMESPACE is not provided")
-	}
 
-	mongoURI = os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		return "", "", "", "", "", "", fmt.Errorf("MONGODB_URI is not provided")
-	}
-
-	mongoDatabase = os.Getenv("MONGODB_DATABASE_NAME")
-	if mongoDatabase == "" {
-		return "", "", "", "", "", "", fmt.Errorf("MONGODB_DATABASE_NAME is not provided")
-	}
-
-	mongoCollection = os.Getenv("MONGODB_COLLECTION_NAME")
-	if mongoCollection == "" {
-		return "", "", "", "", "", "", fmt.Errorf("MONGODB_COLLECTION_NAME is not provided")
-	}
-
-	tokenDatabase = os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		return "", "", "", "", "", "", fmt.Errorf("MONGODB_DATABASE_NAME is not provided")
-	}
-
-	tokenCollection = os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		return "", "", "", "", "", "", fmt.Errorf("MongoDB token collection name is not provided")
-	}
-
-	return namespace, mongoURI, mongoDatabase, mongoCollection, tokenDatabase, tokenCollection, nil
-}
-
-func loadMongoTimeouts() (totalTimeoutSeconds, intervalSeconds, totalCACertTimeoutSeconds,
-	intervalCACertSeconds, unprocessedEventsMetricUpdateIntervalSeconds int, err error) {
-	totalTimeoutSeconds, err = getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
-	if err != nil {
-		return 0, 0, 0, 0, 0, fmt.Errorf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalSeconds, err = getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return 0, 0, 0, 0, 0, fmt.Errorf("invalid MONGODB_PING_INTERVAL_SECONDS: %w", err)
-	}
-
-	totalCACertTimeoutSeconds, err = getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		return 0, 0, 0, 0, 0, fmt.Errorf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalCACertSeconds, err = getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return 0, 0, 0, 0, 0, fmt.Errorf("invalid CA_CERT_READ_INTERVAL_SECONDS: %w", err)
-	}
-
-	unprocessedEventsMetricUpdateIntervalSeconds, err =
-		getEnvAsInt("UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS", 25)
-	if err != nil {
-		return 0, 0, 0, 0, 0, fmt.Errorf("invalid UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: %w", err)
-	}
-
-	return
-}
-
-func createMongoConfig(
-	mongoURI, mongoDatabase, mongoCollection, mongoClientCertMountPath string,
-	totalTimeoutSeconds, intervalSeconds, totalCACertTimeoutSeconds, intervalCACertSeconds int,
-) storewatcher.MongoDBConfig {
-	return storewatcher.MongoDBConfig{
-		URI:        mongoURI,
-		Database:   mongoDatabase,
-		Collection: mongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    totalTimeoutSeconds,
-		TotalPingIntervalSeconds:   intervalSeconds,
-		TotalCACertTimeoutSeconds:  totalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: intervalCACertSeconds,
-	}
-}
-
-func createTokenConfig(tokenDatabase, tokenCollection string) storewatcher.TokenConfig {
-	return storewatcher.TokenConfig{
-		ClientName:      "fault-quarantine-module",
-		TokenDatabase:   tokenDatabase,
-		TokenCollection: tokenCollection,
-	}
-}
-
-func createPipeline() mongo.Pipeline {
-	return mongo.Pipeline{
-		{{Key: "$match", Value: bson.D{{Key: "operationType", Value: bson.D{{Key: "$in", Value: bson.A{"insert"}}}}}}},
+// createUnremediatedEventsPipeline creates a database-agnostic aggregation pipeline that filters
+// change stream events to only include INSERT operations.
+// This matches the main branch behavior where only inserts are processed.
+func createUnremediatedEventsPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", map[string]interface{}{
+				"operationType": map[string]interface{}{
+					"$in": []interface{}{"insert"},
+				},
+			}),
+		),
 	}
 }
 
@@ -202,26 +149,48 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop() // Ensure the signal listener is cleaned up
 
-	metricsPort, mongoClientCertMountPath, kubeconfigPath, dryRun, circuitBreakerEnabled,
+	metricsPort, kubeconfigPath, dryRun, circuitBreakerEnabled,
 		circuitBreakerPercentage, circuitBreakerDuration := parseFlags()
 
-	namespace, mongoURI, mongoDatabase, mongoCollection, tokenDatabase, tokenCollection, err := loadEnvConfig()
+	// Load datastore configuration using the abstraction layer
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
+	if err != nil {
+		slog.Error("Failed to load datastore configuration", "error", err)
+		return fmt.Errorf("failed to load datastore configuration: %w", err)
+	}
+
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
+	if err != nil {
+		slog.Error("Failed to create datastore", "error", err)
+		return fmt.Errorf("failed to create datastore: %w", err)
+	}
+
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			slog.Error("Failed to close datastore", "error", err)
+		}
+	}()
+
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		slog.Error("Failed to ping datastore", "error", err)
+		return fmt.Errorf("failed to ping datastore: %w", err)
+	}
+
+	slog.Info("Successfully connected to datastore", "provider", datastoreConfig.Provider)
+
+	// Load namespace for circuit breaker from POD_NAMESPACE
+	namespace := getEnvWithDefault("POD_NAMESPACE", "default")
+
+	// Get the interval for metrics update
+	unprocessedEventsMetricUpdateIntervalSeconds, err := loadMetricUpdateInterval()
 	if err != nil {
 		return err
 	}
 
-	totalTimeoutSeconds, intervalSeconds, totalCACertTimeoutSeconds,
-		intervalCACertSeconds, unprocessedEventsMetricUpdateIntervalSeconds, err := loadMongoTimeouts()
-	if err != nil {
-		return err
-	}
-
-	mongoConfig := createMongoConfig(mongoURI, mongoDatabase, mongoCollection, *mongoClientCertMountPath,
-		totalTimeoutSeconds, intervalSeconds, totalCACertTimeoutSeconds, intervalCACertSeconds)
-
-	tokenConfig := createTokenConfig(tokenDatabase, tokenCollection)
-
-	pipeline := createPipeline()
+	// Create pipeline for filtering unremediated events (module's business logic)
+	pipeline := createUnremediatedEventsPipeline()
 
 	tomlCfg, err := config.LoadTomlConfig("/etc/config/config.toml")
 	if err != nil {
@@ -241,15 +210,13 @@ func run() error {
 	slog.Info("Successfully initialized k8sclient")
 
 	reconcilerCfg := reconciler.ReconcilerConfig{
-		TomlConfig:                       *tomlCfg,
-		MongoHealthEventCollectionConfig: mongoConfig,
-		TokenConfig:                      tokenConfig,
-		MongoPipeline:                    pipeline,
-		K8sClient:                        k8sClient,
-		DryRun:                           *dryRun,
-		CircuitBreakerEnabled:            *circuitBreakerEnabled,
-		UnprocessedEventsMetricUpdateInterval: time.Duration(unprocessedEventsMetricUpdateIntervalSeconds) *
-			time.Second,
+		TomlConfig:                            *tomlCfg,
+		DataStore:                             dataStore,
+		Pipeline:                              pipeline,
+		K8sClient:                             k8sClient,
+		DryRun:                                *dryRun,
+		CircuitBreakerEnabled:                 *circuitBreakerEnabled,
+		UnprocessedEventsMetricUpdateInterval: time.Duration(unprocessedEventsMetricUpdateIntervalSeconds) * time.Second,
 		CircuitBreaker: reconciler.CircuitBreakerConfig{
 			Namespace:  namespace,
 			Name:       "fault-quarantine-circuit-breaker",
@@ -271,20 +238,3 @@ func run() error {
 	return nil
 }
 
-func getEnvAsInt(name string, defaultValue int) (int, error) {
-	valueStr, exists := os.LookupEnv(name)
-	if !exists {
-		return defaultValue, nil
-	}
-
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return 0, fmt.Errorf("error converting %s to integer: %w", name, err)
-	}
-
-	if value <= 0 {
-		return 0, fmt.Errorf("value of %s must be a positive integer", name)
-	}
-
-	return value, nil
-}

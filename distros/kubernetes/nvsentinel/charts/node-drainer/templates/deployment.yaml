@@ -35,7 +35,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "node-drainer-module.serviceAccountName" . }}
+      serviceAccountName: {{ include "nvsentinel.serviceAccountName" . }}
       containers:
         - name: node-drainer
           image: "{{ .Values.global.nodeDrainerModule.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
@@ -45,26 +45,9 @@ spec:
           ports:
           - name: metrics
             containerPort: {{ .Values.global.metricsPort }}
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: metrics
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: metrics
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
           args:
           - "--metrics-port={{ .Values.global.metricsPort }}"
           - "--config-path={{ .Values.configPath }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "--dry-run={{ .Values.global.dryRun }}"
           volumeMounts:
           - name: config-volume
@@ -74,8 +57,8 @@ spec:
             mountPath: {{ .Values.clientCertMountPath }}
             readOnly: true
           env:
-            - name: LOG_LEVEL
-              value: "{{ .Values.logLevel }}"
+          - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+            value: {{ .Values.clientCertMountPath }}
           envFrom:
             - configMapRef:
                 name: mongodb-config

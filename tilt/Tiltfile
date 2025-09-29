@@ -133,9 +133,9 @@ kwok_node_names = ['kwok-node-' + str(i) + ':node' for i in range(num_gpu_nodes)
 k8s_resource(
     new_name='kwok-fake-nodes',
     objects=kwok_node_names,
-    resource_deps=['kwok', 'nvsentinel-platform-connector', 'nvsentinel-fault-quarantine', 'nvsentinel-fault-remediation', 
+    resource_deps=['kwok', 'nvsentinel-platform-connector', 'nvsentinel-fault-quarantine', 'nvsentinel-fault-remediation',
         'nvsentinel-labeler', 'nvsentinel-node-drainer', 'nvsentinel-mongodb', 'simple-health-client'
-    ], 
+    ],
 )
 k8s_resource(
     'kwok-stage-fast',

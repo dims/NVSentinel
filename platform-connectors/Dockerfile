@@ -22,18 +22,27 @@ FROM public.ecr.aws/docker/library/golang:1.24-bullseye AS builder
 ENV CGO_ENABLED=0
 
 RUN mkdir -p /etc/config
+WORKDIR /go/src
+
+# Copy go modules and dependencies
+COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
+COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
+COPY data-models/go.mod data-models/go.sum ./data-models/
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
+COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+
+# Copy dependency source code
+COPY store-client-sdk/ ./store-client-sdk/
+COPY data-models/ ./data-models/
+COPY health-monitors/ ./health-monitors/
+
+# Copy main module source
+COPY platform-connectors/ ./platform-connectors/
+
 WORKDIR /go/src/platform-connectors
 
-COPY platform-connectors/go.mod platform-connectors/go.sum ./
-COPY data-models/go.mod data-models/go.sum ../data-models/
-COPY commons/go.mod commons/go.sum ../commons/
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
-
-COPY platform-connectors/ .
-COPY data-models/ ../data-models/
-COPY commons/ ../commons/
-
 RUN go build -o platform-connectors main.go
 
 FROM $IMG:$TAG

@@ -30,14 +30,6 @@ var (
 		},
 	)
 
-	// TotalEventsReplayed tracks events replayed at startup
-	TotalEventsReplayed = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "node_drainer_events_replayed_total",
-			Help: "Total number of in-progress events replayed at startup.",
-		},
-	)
-
 	// TotalEventsSuccessfullyProcessed tracks successfully processed events
 	TotalEventsSuccessfullyProcessed = promauto.NewCounter(
 		prometheus.CounterOpts{
@@ -117,15 +109,6 @@ var (
 				"that reached the timeout and force deleted the pods.",
 		},
 		[]string{"node", "namespace"},
-	)
-
-	// EventHandlingDuration tracks event handling durations
-	EventHandlingDuration = promauto.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "node_drainer_event_handling_duration_seconds",
-			Help:    "Histogram of event handling durations.",
-			Buckets: prometheus.DefBuckets,
-		},
 	)
 
 	// NodeDrainStatus tracks which nodes are currently being drained (1 = draining, 0 = not draining)

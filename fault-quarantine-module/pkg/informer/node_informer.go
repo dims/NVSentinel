@@ -16,14 +16,11 @@ package informer
 
 import (
 	"fmt"
-	"log/slog"
-	"reflect"
 	"sync"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/nodeinfo"
-
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -31,6 +28,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -114,31 +112,78 @@ func NewNodeInformer(clientset kubernetes.Interface,
 		return nil, fmt.Errorf("failed to add event handler: %w", err)
 	}
 
-	slog.Info("NodeInformer created, watching nodes with label", "label", GpuNodeLabel, "value", "true")
+	klog.Infof("NodeInformer created, watching nodes with label %s=true", GpuNodeLabel)
 
 	return ni, nil
 }
 
 // Run starts the informer and waits for cache sync.
 func (ni *NodeInformer) Run(stopCh <-chan struct{}) error {
-	slog.Info("Starting NodeInformer", "label", GpuNodeLabel)
+	klog.Info("Starting NodeInformer")
 
 	// Start the informer goroutine
 	go ni.informer.Run(stopCh)
 
 	// Wait for the initial cache synchronization
-	slog.Info("Waiting for NodeInformer cache to sync...")
+	klog.Info("Waiting for NodeInformer cache to sync...")
 
 	if ok := cache.WaitForCacheSync(stopCh, ni.informerSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
-	slog.Info("NodeInformer cache synced")
+	klog.Info("NodeInformer cache synced")
 
-	_, err := ni.recalculateCounts()
-	if err != nil {
-		// Log the error but allow the informer to continue running
-		slog.Error("Initial count calculation failed", "error", err)
+	// Retry recalculateCounts if it returns 0 nodes (cache might still be populating)
+	// This handles the race between cache sync and cache population
+	maxRetries := 10
+	retryDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		changed, err := ni.recalculateCounts()
+		if err != nil {
+			klog.Errorf("Initial count calculation failed on attempt %d: %v", attempt+1, err)
+
+			if attempt < maxRetries-1 {
+				time.Sleep(retryDelay)
+				retryDelay *= 2 // Exponential backoff
+
+				if retryDelay > 2*time.Second {
+					retryDelay = 2 * time.Second
+				}
+
+				continue
+			}
+
+			break
+		}
+
+		// Check if we got nodes
+		ni.mutex.RLock()
+		totalNodes := ni.totalGpuNodes
+		ni.mutex.RUnlock()
+
+		if totalNodes > 0 {
+			klog.Infof("NodeInformer cache populated: %d GPU nodes found", totalNodes)
+			break
+		}
+
+		if attempt < maxRetries-1 {
+			klog.V(2).Infof("NodeInformer cache still empty after sync, retry %d/%d in %v",
+				attempt+1, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+			retryDelay *= 2 // Exponential backoff
+
+			if retryDelay > 2*time.Second {
+				retryDelay = 2 * time.Second
+			}
+		} else {
+			klog.Fatalf("NodeInformer cache still reports 0 nodes after %d retries and ~%v total wait time. "+
+				"This indicates a critical initialization failure - either cluster has no GPU nodes "+
+				"or NodeInformer cannot populate its cache. Pod will restart.",
+				maxRetries, time.Duration(maxRetries)*retryDelay)
+		}
+
+		_ = changed // Ignore changed status during initial population
 	}
 
 	return nil
@@ -210,14 +255,11 @@ func getQuarantineAnnotations(annotations map[string]string) map[string]string {
 func (ni *NodeInformer) handleAddNode(obj interface{}) {
 	node, ok := obj.(*v1.Node)
 	if !ok {
-		slog.Error("Add event received unexpected type",
-			"expected", "*v1.Node",
-			"actualType", reflect.TypeOf(obj))
-
+		klog.Errorf("Add event: expected Node object, got %T", obj)
 		return
 	}
 
-	slog.Debug("Node added", "node", node.Name)
+	klog.V(4).Infof("Node added: %s", node.Name)
 
 	ni.mutex.Lock()
 
@@ -261,16 +303,16 @@ func (ni *NodeInformer) detectAndHandleManualUncordon(oldNode, newNode *v1.Node)
 		return false
 	}
 
-	slog.Info("Detected manual uncordon of FQ-quarantined node", "node", newNode.Name)
+	klog.Infof("Detected manual uncordon of FQ-quarantined node: %s", newNode.Name)
 
 	// Call the manual uncordon handler if registered
 	if ni.onManualUncordon != nil {
 		if err := ni.onManualUncordon(newNode.Name); err != nil {
-			slog.Error("Failed to handle manual uncordon for node", "node", newNode.Name, "error", err)
+			klog.Errorf("Failed to handle manual uncordon for node %s: %v", newNode.Name, err)
 		}
 	} else {
-		slog.Warn("Manual uncordon callback not registered for node - manual uncordon will not be handled",
-			"node", newNode.Name)
+		klog.Warningf("Manual uncordon callback not registered for node %s - manual uncordon will not be handled",
+			newNode.Name)
 	}
 
 	return true
@@ -282,11 +324,7 @@ func (ni *NodeInformer) handleUpdateNode(oldObj, newObj interface{}) {
 
 	newNode, okNew := newObj.(*v1.Node)
 	if !okOld || !okNew {
-		slog.Error("Update event received unexpected type",
-			"expected", "*v1.Node",
-			"oldType", reflect.TypeOf(oldObj),
-			"newType", reflect.TypeOf(newObj))
-
+		klog.Errorf("Update event: expected Node objects, got %T and %T", oldObj, newObj)
 		return
 	}
 
@@ -305,14 +343,12 @@ func (ni *NodeInformer) handleUpdateNode(oldObj, newObj interface{}) {
 	if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable ||
 		oldNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey] !=
 			newNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey] {
-		slog.Debug("Node updated",
-			"node", newNode.Name,
-			"oldUnschedulable", oldNode.Spec.Unschedulable,
-			"newUnschedulable", newNode.Spec.Unschedulable)
+		klog.V(4).Infof("Node updated: %s (Unschedulable: %t -> %t)", newNode.Name,
+			oldNode.Spec.Unschedulable, newNode.Spec.Unschedulable)
 		ni.updateNodeQuarantineStatus(newNode)
 		ni.signalWork()
 	} else {
-		slog.Debug("Node update ignored (no relevant change)", "node", newNode.Name)
+		klog.V(4).Infof("Node update ignored (no relevant change): %s", newNode.Name)
 	}
 
 	// Notify about quarantine annotation changes
@@ -371,24 +407,18 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 		// Handle deletion notifications potentially wrapped in DeletedFinalStateUnknown
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			slog.Error("Delete event received unexpected type",
-				"expected", "*v1.Node or DeletedFinalStateUnknown",
-				"actualType", reflect.TypeOf(obj))
-
+			klog.Errorf("Delete event: expected Node object or DeletedFinalStateUnknown, got %T", obj)
 			return
 		}
 
 		node, ok = tombstone.Obj.(*v1.Node)
 		if !ok {
-			slog.Error("Delete event tombstone contained unexpected type",
-				"expected", "*v1.Node",
-				"actualType", reflect.TypeOf(tombstone.Obj))
-
+			klog.Errorf("Delete event: DeletedFinalStateUnknown contained non-Node object %T", tombstone.Obj)
 			return
 		}
 	}
 
-	slog.Info("Node deleted", "node", node.Name)
+	klog.Infof("Node deleted: %s", node.Name)
 
 	ni.mutex.Lock()
 
@@ -437,6 +467,8 @@ func (ni *NodeInformer) recalculateCounts() (bool, error) {
 		return false, fmt.Errorf("failed to list nodes from informer cache: %w", err)
 	}
 
+	klog.V(3).Infof("NodeInformer lister returned %d nodes from cache", len(nodes))
+
 	total := 0
 	unschedulable := 0
 
@@ -451,7 +483,7 @@ func (ni *NodeInformer) recalculateCounts() (bool, error) {
 				unschedulable++
 			}
 		} else {
-			slog.Warn("Node %s found in informer cache despite missing label %s", node.Name, GpuNodeLabel)
+			klog.Warningf("Node %s found in informer cache despite missing label %s", node.Name, GpuNodeLabel)
 		}
 	}
 
@@ -461,10 +493,14 @@ func (ni *NodeInformer) recalculateCounts() (bool, error) {
 	ni.totalGpuNodes = total
 	ni.mutex.Unlock()
 
-	if changed {
-		slog.Debug("Node counts updated", "totalGpuNodes", total, "unschedulableGpuNodes", unschedulable)
-	} else {
-		slog.Debug("Node counts recalculated, no change", "totalGpuNodes", total, "unschedulableGpuNodes", unschedulable)
+	switch {
+	case total == 0:
+		klog.Warningf("Node counts recalculated: Total GPU Nodes=0 (informer cache may still be populating)")
+	case changed:
+		klog.Infof("Node counts updated: Total GPU Nodes=%d, Unschedulable GPU Nodes=%d", total, unschedulable)
+	default:
+		klog.V(4).Infof("Node counts recalculated, no change: Total GPU Nodes=%d, Unschedulable GPU Nodes=%d",
+			total, unschedulable)
 	}
 
 	return changed, nil
@@ -473,13 +509,13 @@ func (ni *NodeInformer) recalculateCounts() (bool, error) {
 // signalWork sends a non-blocking signal to the reconciler's work channel.
 func (ni *NodeInformer) signalWork() {
 	if ni.workSignal == nil {
-		slog.Error("No channel configured for node informer", "nodeInformer", ni)
+		klog.Errorf("No channel configured for node informer")
 		return // No channel configured
 	}
 	select {
 	case ni.workSignal <- struct{}{}:
-		slog.Debug("Signalled work channel due to node change.")
+		klog.V(3).Infof("Signalled work channel due to node change.")
 	default:
-		slog.Debug("Work channel already signalled, skipping signal for node change.")
+		klog.V(3).Infof("Work channel already signalled, skipping signal for node change.")
 	}
 }

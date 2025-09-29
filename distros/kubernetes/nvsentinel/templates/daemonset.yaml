@@ -73,8 +73,8 @@ spec:
           args:
           - "--config=/etc/config/config.json"
           - "--metrics-port={{ .Values.global.metricsPort }}"
-          - "--mongo-client-cert-mount-path={{ .Values.platformConnector.mongodbStore.clientCertMountPath }}"
           - "--socket={{ .Values.socketPath }}"
+          - "-v={{ .Values.platformConnector.logVerbosity | default 2 }}"
           resources:
             {{- toYaml .Values.platformConnector.resources | nindent 12 }}
           volumeMounts:
@@ -91,6 +91,8 @@ spec:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: spec.nodeName
+            - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+              value: {{ .Values.platformConnector.mongodbStore.clientCertMountPath }}
           envFrom:
             - configMapRef:
                 name: mongodb-config

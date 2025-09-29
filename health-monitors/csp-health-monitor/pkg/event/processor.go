@@ -17,55 +17,54 @@ package event
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	klog "k8s.io/klog/v2"
 )
 
 // Processor persists normalized maintenance events to the backing datastore.
 // Any CSP-specific node-mapping must already have been resolved by the caller.
 type Processor struct {
-	store  datastore.Store
+	store  datastore.DataStore
 	config *config.Config
 	mu     sync.Mutex
 }
 
-// NewProcessor returns an initialized Processor. k8sMapper parameter is
+// NewProcessor returns an initialised Processor. k8sMapper parameter is
 // removed.
-func NewProcessor(cfg *config.Config, store datastore.Store) (*Processor, error) {
+func NewProcessor(cfg *config.Config, store datastore.DataStore) *Processor {
 	if cfg == nil || store == nil {
-		return nil, fmt.Errorf("unable to create processor with nil dependencies (config or store)")
+		klog.Fatalf("Cannot create Event Processor with nil dependencies (config or store)")
+		return nil // Should not be reached
 	}
 
 	return &Processor{
 		config: cfg,
 		store:  store,
-	}, nil
+	}
 }
 
 // ensureClusterName sets the ClusterName on the event from config if missing.
 func (p *Processor) ensureClusterName(event *model.MaintenanceEvent) {
 	if event.ClusterName == "" && p.config.ClusterName != "" {
 		event.ClusterName = p.config.ClusterName
-		slog.Debug("Event missing cluster name; set from config",
-			"eventID", event.EventID,
-			"clusterName", event.ClusterName)
+		klog.V(2).Infof("Event %s missing cluster name; set from config: %s",
+			event.EventID, event.ClusterName)
 	} else if event.ClusterName == "" {
-		slog.Warn("Event missing cluster name and no global config available",
-			"eventID", event.EventID)
+		klog.Warningf("Event %s missing cluster name and no global config available.", event.EventID)
 	}
 }
 
 // defaultStatus ensures event.Status has a default value.
 func defaultStatus(event *model.MaintenanceEvent) {
 	if event.Status == "" {
-		slog.Warn("Event has empty status; defaulting",
-			"eventID", event.EventID,
-			"defaultStatus", model.StatusDetected)
+		klog.Warningf("Event %s has empty status; defaulting to %s.",
+			event.EventID, model.StatusDetected)
 
 		event.Status = model.StatusDetected
 	}
@@ -77,8 +76,7 @@ func (p *Processor) inheritState(ctx context.Context, event *model.MaintenanceEv
 	// MaintenanceType might be empty on the incoming event (e.g. sparse COMPLETED log)
 	// and the specific inheritance functions will handle trying to find a match.
 	if event.NodeName == "" {
-		slog.Debug("Event missing NodeName; skipping inheritance",
-			"eventID", event.EventID)
+		klog.V(2).Infof("Event %s missing NodeName; skipping inheritance", event.EventID)
 		return
 	}
 
@@ -96,12 +94,11 @@ func (p *Processor) inheritState(ctx context.Context, event *model.MaintenanceEv
 		model.StatusNodeReadinessTimeout,
 		model.StatusCancelled,
 		model.StatusError:
-		slog.Info("Event has status; no specific state inheritance rules apply",
-			"eventID", event.EventID,
-			"status", event.Status)
+		klog.V(3).
+			Infof("Event %s has status %s; no specific state inheritance rules apply.", event.EventID, event.Status)
 	default:
 		// This case handles any unexpected or future InternalStatus values.
-		slog.Warn(
+		klog.Warningf(
 			"Event %s has unhandled status '%s' in inheritState; no action taken.",
 			event.EventID,
 			event.Status,
@@ -113,13 +110,10 @@ func (p *Processor) inheritState(ctx context.Context, event *model.MaintenanceEv
 //
 //nolint:cyclop
 func (p *Processor) inheritPendingToOngoing(ctx context.Context, event *model.MaintenanceEvent) {
-	prior, found, err := p.store.FindLatestActiveEventByNodeAndType(
+	prior, found, err := p.store.MaintenanceEventStore().FindLatestActiveEventByNodeAndType(
 		ctx, event.NodeName, event.MaintenanceType, []model.InternalStatus{model.StatusDetected})
 	if err != nil {
-		slog.Warn("Error finding prior PENDING for event",
-			"eventID", event.EventID,
-			"error", err)
-
+		klog.Warningf("Error finding prior PENDING for event %s: %v", event.EventID, err)
 		return
 	}
 
@@ -151,7 +145,7 @@ func (p *Processor) inheritPendingToOngoing(ctx context.Context, event *model.Ma
 //
 //nolint:cyclop
 func (p *Processor) inheritOngoingToCompleted(ctx context.Context, event *model.MaintenanceEvent) {
-	slog.Info(
+	klog.InfoS(
 		"[Processor.inheritOngoingToCompleted] Processing COMPLETED event, attempting to find latest ONGOING for node",
 		"completedEventID",
 		event.EventID,
@@ -159,18 +153,21 @@ func (p *Processor) inheritOngoingToCompleted(ctx context.Context, event *model.
 		event.NodeName,
 	)
 
-	priorEvent, found, err := p.store.FindLatestOngoingEventByNode(ctx, event.NodeName)
+	priorEvent, found, err := p.store.MaintenanceEventStore().FindLatestOngoingEventByNode(ctx, event.NodeName)
 	if err != nil {
-		slog.Warn("[inheritOngoingToCompleted] Error finding prior ONGOING event for COMPLETED event; no inheritance applied",
-			"eventID", event.EventID,
-			"node", event.NodeName,
-			"error", err)
+		klog.Warningf(
+			"[inheritOngoingToCompleted] Error finding prior ONGOING event for COMPLETED event %s "+
+				"(Node: %s): %v. No inheritance applied.",
+			event.EventID,
+			event.NodeName,
+			err,
+		)
 
 		return
 	}
 
 	if !found || priorEvent == nil {
-		slog.Warn(
+		klog.Warningf(
 			"[inheritOngoingToCompleted] No prior ONGOING event found for COMPLETED event %s "+
 				"(Node: %s). No inheritance applied.",
 			event.EventID,
@@ -180,13 +177,13 @@ func (p *Processor) inheritOngoingToCompleted(ctx context.Context, event *model.
 		return
 	}
 
-	slog.Info("COMPLETED event before inheritance",
+	klog.V(2).InfoS("COMPLETED event before inheritance",
 		"eventID", event.EventID,
 		"maintenanceType", event.MaintenanceType,
 		"scheduledStart", safeFormatTime(event.ScheduledStartTime),
 		"actualStart", safeFormatTime(event.ActualStartTime),
 	)
-	slog.Info("Prior ONGOING event details",
+	klog.V(3).InfoS("Prior ONGOING event details",
 		"priorEventID", priorEvent.EventID,
 		"maintenanceType", priorEvent.MaintenanceType,
 		"scheduledStart", safeFormatTime(priorEvent.ScheduledStartTime),
@@ -218,7 +215,7 @@ func (p *Processor) inheritOngoingToCompleted(ctx context.Context, event *model.
 		event.ResourceType = priorEvent.ResourceType
 	}
 
-	slog.Info("COMPLETED event after inheritance",
+	klog.V(2).InfoS("COMPLETED event after inheritance",
 		"eventID", event.EventID,
 		"maintenanceType", event.MaintenanceType,
 		"scheduledStart", safeFormatTime(event.ScheduledStartTime),
@@ -228,7 +225,7 @@ func (p *Processor) inheritOngoingToCompleted(ctx context.Context, event *model.
 
 // logEventDetails logs key event fields before upsert.
 func (p *Processor) logEventDetails(event *model.MaintenanceEvent) {
-	slog.Info("Event details before upsert",
+	klog.InfoS("Event details before upsert",
 		"EventID", event.EventID,
 		"Cluster", event.ClusterName,
 		"Node", event.NodeName,
@@ -246,7 +243,7 @@ func (p *Processor) logEventDetails(event *model.MaintenanceEvent) {
 // logMissingNode warns if NodeName is missing but ResourceID is present.
 func (p *Processor) logMissingNode(event *model.MaintenanceEvent) {
 	if event.NodeName == "" && event.ResourceID != "" && event.ResourceID != defaultUnknown {
-		slog.Warn(
+		klog.Warningf(
 			"Event %s has ResourceID %s but no NodeName; mapping may have failed",
 			event.EventID,
 			event.ResourceID,
@@ -274,21 +271,17 @@ func (p *Processor) ProcessEvent(ctx context.Context, event *model.MaintenanceEv
 
 	metrics.MainDatastoreUpsertAttempts.WithLabelValues(string(event.CSP)).Inc()
 
-	if err := p.store.UpsertMaintenanceEvent(ctx, event); err != nil {
+	if err := p.store.MaintenanceEventStore().UpsertMaintenanceEvent(ctx, event); err != nil {
 		metrics.MainDatastoreUpsertErrors.WithLabelValues(string(event.CSP)).Inc()
 		metrics.MainProcessingErrors.WithLabelValues(string(event.CSP), "datastore_upsert").Inc()
-		slog.Error("Failed to upsert event",
-			"eventID", event.EventID,
-			"error", err)
+		klog.Errorf("Failed to upsert event %s: %v", event.EventID, err)
 
 		return fmt.Errorf("failed to upsert event %s: %w", event.EventID, err)
 	}
 
 	metrics.MainDatastoreUpsertSuccess.WithLabelValues(string(event.CSP)).Inc()
 
-	slog.Debug("Processed event",
-		"eventID", event.EventID,
-		"node", event.NodeName)
+	klog.V(1).Infof("Processed event %s (Node:%s)", event.EventID, event.NodeName)
 
 	return nil
 }

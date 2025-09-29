@@ -19,10 +19,10 @@ import (
 	"testing"
 	"text/template"
 
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	platformconnectorprotos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metameta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -56,6 +56,14 @@ func (m *MockNamespaceableResource) Namespace(namespace string) dynamic.Resource
 	return &MockResourceInterface{
 		createFunc: m.createFunc,
 	}
+}
+
+func (m *MockNamespaceableResource) Get(ctx context.Context, name string, opts metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	// Return NotFound error to simulate resource doesn't exist yet
+	return nil, errors.NewNotFound(schema.GroupResource{
+		Group:    "janitor.dgxc.nvidia.com",
+		Resource: "rebootnodes",
+	}, name)
 }
 
 func (m *MockNamespaceableResource) Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
@@ -248,7 +256,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 		name              string
 		nodeName          string
 		dryRun            bool
-		recommendedAction platformconnector.RecommenedAction
+		recommendedAction platformconnectorprotos.RecommenedAction
 		shouldSucceed     bool
 		expectedError     bool
 		shouldCreate      bool
@@ -257,7 +265,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 			name:              "Successful rebootnode creation",
 			nodeName:          "test-node-1",
 			dryRun:            false,
-			recommendedAction: platformconnector.RecommenedAction_RESTART_BM,
+			recommendedAction: platformconnectorprotos.RecommenedAction_RESTART_VM,
 			shouldSucceed:     true,
 			expectedError:     false,
 			shouldCreate:      true,
@@ -266,7 +274,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 			name:              "Skip rebootnode creation with dry run",
 			nodeName:          "test-node-2",
 			dryRun:            true,
-			recommendedAction: platformconnector.RecommenedAction_RESTART_BM,
+			recommendedAction: platformconnectorprotos.RecommenedAction_RESTART_VM,
 			shouldSucceed:     true,
 			expectedError:     false,
 			shouldCreate:      false,
@@ -326,9 +334,9 @@ spec:
 
 			// Create a HealthEventDoc object
 			healthEventDoc := &HealthEventDoc{
-				ID: primitive.NewObjectID(),
-				HealthEventWithStatus: storeconnector.HealthEventWithStatus{
-					HealthEvent: &platformconnector.HealthEvent{
+				ID: "test-health-event-id",
+				HealthEventWithStatus: datastore.HealthEventWithStatus{
+					HealthEvent: &platformconnectorprotos.HealthEvent{
 						NodeName:          tt.nodeName,
 						RecommendedAction: tt.recommendedAction,
 					},
@@ -336,11 +344,8 @@ spec:
 			}
 
 			// Test CreateMaintenanceResource
-			result, crName := client.CreateMaintenanceResource(context.Background(), healthEventDoc)
+			result := client.CreateMaintenanceResource(context.Background(), healthEventDoc)
 			assert.Equal(t, tt.shouldSucceed, result)
-			if tt.shouldSucceed && !tt.dryRun {
-				assert.NotEmpty(t, crName, "CR name should be returned on success")
-			}
 			assert.Equal(t, tt.shouldCreate, createCalled, "Create function call expectation mismatch")
 		})
 	}

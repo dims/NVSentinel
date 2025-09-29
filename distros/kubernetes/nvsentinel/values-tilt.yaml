@@ -15,6 +15,21 @@
 global:
   dryRun: false
   kubeVersion: 1.31.0
+  clusterType: "standalone"
+  tiltMode: true  # Flag to identify Tilt-based development environments
+
+  # Datastore provider configuration (can be overridden)
+  datastore:
+    provider: "mongodb"  # Default to MongoDB for backward compatibility
+    connection:
+      host: "mongodb"
+      port: 27017
+      database: "nvsentinel"
+    options:
+      maxConnections: "25"
+      maxIdleConnections: "10"
+      connectionMaxLifetime: "1h"
+      pollInterval: "5s"
 
   nodeSelector: {}
   
@@ -60,35 +75,113 @@ global:
   inclusterFileServer:
     enabled: false
 
+# Service-specific configurations for MongoDB mode (Tilt defaults)
+
   mongodbStore:
     images:
       kubectl:
-        repository: bitnamilegacy/kubectl
+        repository: docker.io/bitnamilegacy/kubectl
         tag: "1.30.6"
         pullPolicy: IfNotPresent
       mongosh:
-        repository: rtsp/mongosh
+        repository: docker.io/rtsp/mongosh
         tag: "2.5.2"
         pullPolicy: IfNotPresent
 
   kata:
     enabled: false
-  
-  janitor:
-    enabled: true
+
+  # Enable syslog monitoring for both XID and SXID errors
+  # Disabled in Tilt mode as it requires NVIDIA drivers
+  xidUsingSyslogMonitor: false
+  sxidUsingSyslogMonitor: false
 
 platformConnector:
+  logVerbosity: 2
   mongodbStore:
     enabled: true
     clientCertMountPath: "/etc/ssl/mongo-client"
 
+gpu-health-monitor:
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  systemNodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+  - operator: Exists
+
+  systemNodeTolerations:
+  - operator: Exists
+
+csp-health-monitor:
+  clientCertMountPath: "/etc/ssl/mongo-client"
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+  - operator: Exists
+
+fault-quarantine:
+  clientCertMountPath: "/etc/ssl/mongo-client"
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+  - operator: Exists
+
+fault-remediation:
+  clientCertMountPath: "/etc/ssl/mongo-client"
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+  - operator: Exists
+
+node-drainer:
+  clientCertMountPath: "/etc/ssl/mongo-client"
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+  - operator: Exists
+
+syslog-health-monitor:
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  tolerations:
+  - operator: Exists
+
+  systemNodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  systemNodeTolerations:
+  - operator: Exists
+
+health-events-analyzer:
+  logLevel: 2
+  clientCertMountPath: "/etc/ssl/mongo-client"
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+  - operator: Exists
+
+tolerations:
+- operator: Exists
 
 mongodb-store:
   mongodb:
-    replicaCount: 1
+
+    global:
+      imagePullSecrets:
+        - nvidia-ngcuser-pull-secret
+
     nodeSelector:
       node-role.kubernetes.io/control-plane: ""
-    
+
     tolerations:
     - operator: Exists
 
@@ -102,10 +195,6 @@ mongodb-store:
       pullPolicy: "IfNotPresent"
 
     tls:
-      replicaset:
-        existingSecrets:
-          - "mongo-server-cert-0"
-      
       image:
         registry: "docker.io"
         repository: "bitnamilegacy/nginx"
@@ -113,29 +202,26 @@ mongodb-store:
         pullPolicy: "IfNotPresent"
 
     metrics:
-      enabled: true
+      enabled: false
       image:
         registry: docker.io
         repository: bitnamilegacy/mongodb-exporter
         tag: 0.41.2-debian-12-r1
 
-# Override log levels for all modules during testing
-fault-quarantine:
-  logLevel: debug
+#    # Reduce MongoDB log verbosity - using configuration for fine-grained control
+#    configuration: |-
+#      # Reduce overall log verbosity
+#      systemLog:
+#        quiet: true
+#        verbosity: 0
+#        # Reduce noisy component logs (network, replication)
+#        component:
+#          network:
+#            verbosity: 0
+#          replication:
+#            verbosity: 0
 
-fault-remediation:
-  logLevel: debug
-
-node-drainer:
-  logLevel: debug
-
-labeler:
-  logLevel: debug
-
-health-events-analyzer:
-  logLevel: debug
-
-csp-health-monitor:
-  logLevel: debug
-  quarantineTriggerEngine:
-    logLevel: debug
+  # Enable syslog monitoring for both XID and SXID errors
+  # Disabled in Tilt mode as it requires NVIDIA drivers
+  xidUsingSyslogMonitor: false
+  sxidUsingSyslogMonitor: false

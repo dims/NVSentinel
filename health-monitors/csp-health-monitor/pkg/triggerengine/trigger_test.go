@@ -32,9 +32,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 )
 
 // MockDatastore is a mock implementation of the datastore.Store interface
@@ -859,4 +860,98 @@ func TestHealthyTriggerWaitsForNodeReady(t *testing.T) {
 
 	mUDSClient.AssertExpectations(t)
 	mStore.AssertExpectations(t)
+}
+
+func (m *MockDatastore) Close(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
+func (m *MockDatastore) HealthEventStore() datastore.HealthEventStore {
+	args := m.Called()
+	return args.Get(0).(datastore.HealthEventStore)
+}
+
+func (m *MockDatastore) MaintenanceEventStore() datastore.MaintenanceEventStore {
+	// Return a MockMaintenanceEventStore that has the same methods as the MockDatastore
+	// This allows the test to continue calling the methods directly on MockDatastore
+	return m
+}
+
+func (m *MockDatastore) InsertMany(ctx context.Context, documents []interface{}) error {
+	args := m.Called(ctx, documents)
+	return args.Error(0)
+}
+
+func (m *MockDatastore) Ping(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
+// MockMaintenanceEventStore for testing
+type MockMaintenanceEventStore struct {
+	mock.Mock
+}
+
+func (m *MockMaintenanceEventStore) UpsertMaintenanceEvent(ctx context.Context, event *model.MaintenanceEvent) error {
+	args := m.Called(ctx, event)
+	return args.Error(0)
+}
+
+func (m *MockMaintenanceEventStore) FindEventsToTriggerQuarantine(ctx context.Context, triggerTimeLimit time.Duration) ([]model.MaintenanceEvent, error) {
+	args := m.Called(ctx, triggerTimeLimit)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]model.MaintenanceEvent), args.Error(1)
+}
+
+func (m *MockMaintenanceEventStore) FindEventsToTriggerHealthy(ctx context.Context, healthyDelay time.Duration) ([]model.MaintenanceEvent, error) {
+	args := m.Called(ctx, healthyDelay)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]model.MaintenanceEvent), args.Error(1)
+}
+
+func (m *MockMaintenanceEventStore) UpdateEventStatus(ctx context.Context, eventID string, newStatus model.InternalStatus) error {
+	args := m.Called(ctx, eventID, newStatus)
+	return args.Error(0)
+}
+
+func (m *MockMaintenanceEventStore) GetLastProcessedEventTimestampByCSP(ctx context.Context, clusterName string, csp model.CSP) (*time.Time, error) {
+	args := m.Called(ctx, clusterName, csp)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*time.Time), args.Error(1)
+}
+
+func (m *MockMaintenanceEventStore) UpdateLastProcessedEventTimestampByCSP(ctx context.Context, clusterName string, csp model.CSP, timestamp time.Time) error {
+	args := m.Called(ctx, clusterName, csp, timestamp)
+	return args.Error(0)
+}
+
+func (m *MockMaintenanceEventStore) FindLatestOngoingEventByNode(ctx context.Context, nodeName string) (*model.MaintenanceEvent, bool, error) {
+	args := m.Called(ctx, nodeName)
+	if args.Get(0) == nil {
+		return nil, args.Bool(1), args.Error(2)
+	}
+	return args.Get(0).(*model.MaintenanceEvent), args.Bool(1), args.Error(2)
+}
+
+func (m *MockMaintenanceEventStore) FindActiveEventsByStatuses(ctx context.Context, csp model.CSP, statuses []string) ([]model.MaintenanceEvent, error) {
+	args := m.Called(ctx, csp, statuses)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]model.MaintenanceEvent), args.Error(1)
+}
+
+func (m *MockMaintenanceEventStore) FindEventsTriggeredInMaintenanceWindow(ctx context.Context, maintenanceType model.MaintenanceType, maintenanceStartTime, maintenanceEndTime time.Time) (*model.MaintenanceEvent, bool, error) {
+	args := m.Called(ctx, maintenanceType, maintenanceStartTime, maintenanceEndTime)
+	if args.Get(0) == nil {
+		return nil, args.Bool(1), args.Error(2)
+	}
+	return args.Get(0).(*model.MaintenanceEvent), args.Bool(1), args.Error(2)
 }

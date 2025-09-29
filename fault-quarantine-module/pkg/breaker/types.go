@@ -59,6 +59,7 @@ type Config struct {
 	// This allows the threshold to adapt to cluster scaling events.
 	GetTotalNodes func(ctx context.Context) (int, error)
 
+	// Retry configuration for handling NodeInformer cache sync delays
 	// MaxRetries is the maximum number of retry attempts when GetTotalNodes returns 0
 	// Default: 10 retries (allows ~30 seconds for cache sync with exponential backoff)
 	MaxRetries int

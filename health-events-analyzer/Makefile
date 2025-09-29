@@ -19,6 +19,7 @@
 # MODULE-SPECIFIC CONFIGURATION
 # =============================================================================
 
+# Module type and capabilities
 IS_GO_MODULE := 1
 HAS_DOCKER := 1
 
@@ -27,7 +28,7 @@ CLEAN_EXTRA_FILES := health-events-analyzer
 DOCKER_EXTRA_ARGS :=
 
 # =============================================================================
-# INCLUDE SHARED DEFINITIONS
+# INCLUDE COMMON DEFINITIONS
 # =============================================================================
 
 include ../make/common.mk
@@ -35,25 +36,27 @@ include ../make/go.mk
 include ../make/docker.mk
 
 # =============================================================================
-# DEFAULT TARGET
+# LEGACY COMPATIBILITY
 # =============================================================================
 
-.PHONY: all
-all: lint-test
+# Legacy targets for backwards compatibility
+.PHONY: image publish
+image: docker-build
+publish: docker-publish
 
 # =============================================================================
 # MODULE HELP
 # =============================================================================
 
-.PHONY: help
 help:
-	@echo "Health Events Analyzer Makefile - Using nvsentinel make/*.mk standards"
+	@echo "Health Events Analyzer Makefile - Using nvsentinel common.mk standards"
 	@echo ""
 	@echo "This module analyzes and processes health events from various sources."
 	@echo ""
-	@echo "Main targets: all, lint-test, ci-test, build, test, lint, clean"
-	@echo "Docker targets: docker, docker-build, docker-publish"
-
+	@echo "Configuration (environment variables):"
+	@echo "  MODULE_NAME=$(MODULE_NAME)"
+	@echo "  REPO_ROOT=$(REPO_ROOT)"
+	@echo ""
 	@echo "Main targets:"
 	@echo "  all        - Run lint-test (standardized default)"
 	@echo "  lint-test  - Run full lint and test suite"

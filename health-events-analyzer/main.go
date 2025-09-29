@@ -17,225 +17,133 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 
-	"github.com/nvidia/nvsentinel/commons/pkg/logger"
-	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+
+	// Datastore abstraction
+	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+
+	// Import all providers to ensure registration
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"k8s.io/klog"
 )
 
-var (
-	// These variables will be populated during the build process
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
-)
-
+//nolint:cyclop // todo
 func main() {
-	logger.SetDefaultStructuredLogger("health-events-analyzer", version)
-	slog.Info("Starting health-events-analyzer", "version", version, "commit", commit, "date", date)
+	ctx := context.Background()
 
-	if err := run(); err != nil {
-		slog.Error("Fatal error", "error", err)
-		os.Exit(1)
-	}
-}
+	var metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
 
-func loadMongoConfig(mongoClientCertMountPath string) (storewatcher.MongoDBConfig, error) {
-	mongoURI := os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("MONGODB_URI is not set")
-	}
+	var socket = flag.String("socket", "unix:///var/run/nvsentinel.sock", "unix domain socket")
 
-	mongoDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if mongoDatabase == "" {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("MONGODB_DATABASE_NAME is not set")
-	}
+	// Initialize klog flags to allow command-line control (e.g., -v=3)
+	klog.InitFlags(nil)
 
-	mongoCollection := os.Getenv("MONGODB_COLLECTION_NAME")
-	if mongoCollection == "" {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("MONGODB_COLLECTION_NAME is not set")
-	}
+	defer klog.Flush()
+	flag.Parse()
 
-	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
+	// Load datastore configuration using the abstraction layer
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %w", err)
+		klog.Fatalf("Failed to load datastore configuration: %v", err)
 	}
 
-	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid MONGODB_PING_INTERVAL_SECONDS: %w", err)
+		klog.Fatalf("Failed to create datastore: %v", err)
 	}
 
-	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return storewatcher.MongoDBConfig{}, fmt.Errorf("invalid CA_CERT_READ_INTERVAL_SECONDS: %w", err)
-	}
-
-	return storewatcher.MongoDBConfig{
-		URI:        mongoURI,
-		Database:   mongoDatabase,
-		Collection: mongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    totalTimeoutSeconds,
-		TotalPingIntervalSeconds:   intervalSeconds,
-		TotalCACertTimeoutSeconds:  totalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: intervalCACertSeconds,
-	}, nil
-}
-
-func loadTokenConfig() (storewatcher.TokenConfig, error) {
-	tokenDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		return storewatcher.TokenConfig{}, fmt.Errorf("MONGODB_DATABASE_NAME is not set")
-	}
-
-	tokenCollection := os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		return storewatcher.TokenConfig{}, fmt.Errorf("MONGODB_TOKEN_COLLECTION_NAME is not set")
-	}
-
-	return storewatcher.TokenConfig{
-		ClientName:      "health-events-analyzer",
-		TokenDatabase:   tokenDatabase,
-		TokenCollection: tokenCollection,
-	}, nil
-}
-
-func createPipeline() mongo.Pipeline {
-	return mongo.Pipeline{
-		bson.D{
-			{Key: "$match", Value: bson.D{
-				{Key: "operationType", Value: "insert"},
-				{Key: "fullDocument.healthevent.isfatal", Value: false},
-				{Key: "fullDocument.healthevent.ishealthy", Value: false},
-			}},
-		},
-	}
-}
-
-func connectToPlatform(socket string) (*publisher.PublisherConfig, *grpc.ClientConn, error) {
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-
-	conn, err := grpc.NewClient(socket, opts...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to dial platform connector UDS %s: %w", socket, err)
-	}
-
-	platformConnectorClient := pb.NewPlatformConnectorClient(conn)
-	pub := publisher.NewPublisher(platformConnectorClient)
-
-	return pub, conn, nil
-}
-
-func startMetricsServer(metricsPort string) {
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		})
-		slog.Info("Starting metrics server", "port", metricsPort)
-		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
-		err := http.ListenAndServe(":"+metricsPort, nil)
-		if err != nil {
-			slog.Error("Failed to start metrics server", "error", err)
-			os.Exit(1)
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			klog.Errorf("Failed to close datastore: %v", err)
 		}
 	}()
 
-	slog.Info("Metrics server goroutine started")
-}
-
-func run() error {
-	ctx := context.Background()
-
-	metricsPort := flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
-	socket := flag.String("socket", "unix:///var/run/nvsentinel.sock", "unix domain socket")
-
-	mongoClientCertMountPath := flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
-
-	flag.Parse()
-
-	mongoConfig, err := loadMongoConfig(*mongoClientCertMountPath)
-	if err != nil {
-		return err
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		klog.Fatalf("Failed to ping datastore: %v", err)
 	}
 
-	tokenConfig, err := loadTokenConfig()
-	if err != nil {
-		return err
-	}
+	klog.Infof("Successfully connected to datastore provider: %s", datastoreConfig.Provider)
 
-	pipeline := createPipeline()
+	// Get collection name from environment (with defaults)
+	collection := getEnvWithDefault("DATASTORE_COLLECTION_NAME", "HealthEvents")
 
-	pub, conn, err := connectToPlatform(*socket)
+	var opts []grpc.DialOption
+	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+	conn, err := grpc.NewClient(*socket, opts...)
 	if err != nil {
-		return err
+		panic(err)
 	}
 	defer conn.Close()
+
+	platformConnectorClient := pb.NewPlatformConnectorClient(conn)
+	publisher := publisher.NewPublisher(platformConnectorClient)
 
 	// Parse the TOML content
 	tomlConfig, err := config.LoadTomlConfig("/etc/config/config.toml")
 	if err != nil {
-		return fmt.Errorf("error loading TOML config: %w", err)
+		klog.Fatalf("Failed to load config file: %v", err)
 	}
+
+	// Create pipeline to watch for INSERT events of non-fatal unhealthy events
+	pipeline := createHealthEventsAnalyzerPipeline()
 
 	reconcilerCfg := reconciler.HealthEventsAnalyzerReconcilerConfig{
-		MongoHealthEventCollectionConfig: mongoConfig,
-		TokenConfig:                      tokenConfig,
-		MongoPipeline:                    pipeline,
-		HealthEventsAnalyzerRules:        tomlConfig,
-		Publisher:                        pub,
+		HealthEventsAnalyzerRules: tomlConfig,
+		Publisher:                 publisher,
+		DataStore:                 dataStore,
+		CollectionName:            collection,
+		Pipeline:                  pipeline,
 	}
 
-	rec := reconciler.NewReconciler(reconcilerCfg)
+	reconciler := reconciler.NewReconciler(reconcilerCfg)
 
-	startMetricsServer(*metricsPort)
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
+		err := http.ListenAndServe(":"+*metricsPort, nil)
+		if err != nil {
+			klog.Fatalf("Failed to start metrics server: %v", err)
+		}
+	}()
 
-	rec.Start(ctx)
-
-	return nil
+	reconciler.Start(ctx)
 }
 
-func getEnvAsInt(name string, defaultValue int) (int, error) {
-	valueStr, exists := os.LookupEnv(name)
-	if !exists {
-		return defaultValue, nil
+// createHealthEventsAnalyzerPipeline creates a database-agnostic aggregation pipeline that filters
+// change stream events to only include INSERT operations of non-fatal, unhealthy events.
+// Note: InsertHealthEvents stores the eventWithStatus under "document" key
+// See store-client-sdk/pkg/datastore/providers/mongodb/datastore.go:633
+func createHealthEventsAnalyzerPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "insert"),
+				datastore.E("fullDocument.document.healthevent.isfatal", false),
+				datastore.E("fullDocument.document.healthevent.ishealthy", false),
+			)),
+		),
+	}
+}
+
+// getEnvWithDefault returns the environment variable value or a default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return 0, fmt.Errorf("error converting %s to integer: %w", name, err)
-	}
-
-	if value <= 0 {
-		return 0, fmt.Errorf("value of %s must be a positive integer", name)
-	}
-
-	return value, nil
+	return defaultValue
 }

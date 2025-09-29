@@ -24,9 +24,9 @@ ENV POETRY_NO_INTERACTION=1 \
 
 WORKDIR /app
 
-COPY nvsentinel-log-collector/pyproject.toml ./
-COPY nvsentinel-log-collector/poetry.lock ./
-COPY nvsentinel-log-collector/file_server_cleanup ./file_server_cleanup
+COPY pyproject.toml ./
+COPY poetry.lock ./
+COPY file_server_cleanup ./file_server_cleanup
 RUN --mount=type=cache,target=/tmp/poetry_cache \
     poetry build --format wheel 
 RUN poetry export --format requirements.txt --output constraints.txt --without-hashes

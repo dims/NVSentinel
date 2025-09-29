@@ -20,27 +20,32 @@ ARG IMG=nvcr.io/nvidia/distroless/go
 FROM public.ecr.aws/docker/library/golang:1.24-bullseye AS builder
 
 # TODO: remove when pushing to GitHub
+ENV GOPRIVATE=*.nvidia.com
+ENV CGO_ENABLED=0
 
 WORKDIR /go/src
 
-# Copy go.mod and go.sum files for all dependencies first
+# Copy go modules and dependencies
+COPY health-events-analyzer/go.mod health-events-analyzer/go.sum ./health-events-analyzer/
+COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
 COPY data-models/go.mod data-models/go.sum ./data-models/
 COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
-COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
-COPY commons/go.mod commons/go.sum ./commons/
-COPY health-events-analyzer/go.mod health-events-analyzer/go.sum ./health-events-analyzer/
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
+COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+
+# Copy dependency source code
+COPY store-client-sdk/ ./store-client-sdk/
+COPY data-models/ ./data-models/
+COPY platform-connectors/ ./platform-connectors/
+COPY health-monitors/ ./health-monitors/
+
+# Copy main module source
+COPY health-events-analyzer/ ./health-events-analyzer/
 
 WORKDIR /go/src/health-events-analyzer
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
-
-# Copy the source code after go mod download
-COPY data-models/ ../data-models/
-COPY platform-connectors/ ../platform-connectors/
-COPY store-client-sdk/ ../store-client-sdk/
-COPY commons/ ../commons/
-COPY health-events-analyzer/ .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -o healtheventsanalyzer main.go

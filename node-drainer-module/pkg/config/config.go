@@ -16,17 +16,10 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	"github.com/nvidia/nvsentinel/statemanager"
-	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type EvictMode string
@@ -93,12 +86,21 @@ func LoadTomlConfigFromString(configString string) (*TomlConfig, error) {
 }
 
 func validateAndSetDefaults(config *TomlConfig) (*TomlConfig, error) {
+	if err := validateTimeoutDefaults(config); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+// validateTimeoutDefaults validates timeout-related configuration
+func validateTimeoutDefaults(config *TomlConfig) error {
 	if config.DeleteAfterTimeoutMinutes == 0 {
 		config.DeleteAfterTimeoutMinutes = 60 // Default: 60 minutes
 	}
 
 	if config.DeleteAfterTimeoutMinutes <= 0 {
-		return nil, fmt.Errorf("deleteAfterTimeout must be a positive integer")
+		return fmt.Errorf("deleteAfterTimeout must be a positive integer")
 	}
 
 	if config.NotReadyTimeoutMinutes == 0 {
@@ -106,154 +108,8 @@ func validateAndSetDefaults(config *TomlConfig) (*TomlConfig, error) {
 	}
 
 	if config.NotReadyTimeoutMinutes <= 0 {
-		return nil, fmt.Errorf("notReadyTimeoutMinutes must be a positive integer")
+		return fmt.Errorf("notReadyTimeoutMinutes must be a positive integer")
 	}
 
-	return config, nil
-}
-
-type ReconcilerConfig struct {
-	TomlConfig    TomlConfig
-	MongoConfig   storewatcher.MongoDBConfig
-	TokenConfig   storewatcher.TokenConfig
-	MongoPipeline mongo.Pipeline
-	StateManager  statemanager.StateManager
-}
-
-// EnvConfig holds configuration loaded from environment variables
-type EnvConfig struct {
-	MongoURI                  string
-	MongoDatabase             string
-	MongoCollection           string
-	TokenDatabase             string
-	TokenCollection           string
-	TotalTimeoutSeconds       int
-	IntervalSeconds           int
-	TotalCACertTimeoutSeconds int
-	IntervalCACertSeconds     int
-}
-
-// LoadEnvConfig loads and validates environment variable configuration
-func LoadEnvConfig() (*EnvConfig, error) {
-	mongoURI := os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		return nil, fmt.Errorf("MONGODB_URI is not provided")
-	}
-
-	mongoDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if mongoDatabase == "" {
-		return nil, fmt.Errorf("MONGODB_DATABASE_NAME is not provided")
-	}
-
-	mongoCollection := os.Getenv("MONGODB_COLLECTION_NAME")
-	if mongoCollection == "" {
-		return nil, fmt.Errorf("MONGODB_COLLECTION_NAME is not provided")
-	}
-
-	tokenDatabase := os.Getenv("MONGODB_DATABASE_NAME")
-	if tokenDatabase == "" {
-		return nil, fmt.Errorf("MONGODB_DATABASE_NAME is not provided")
-	}
-
-	tokenCollection := os.Getenv("MONGODB_TOKEN_COLLECTION_NAME")
-	if tokenCollection == "" {
-		return nil, fmt.Errorf("MONGODB_TOKEN_COLLECTION_NAME is not provided")
-	}
-
-	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
-	if err != nil {
-		return nil, fmt.Errorf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return nil, fmt.Errorf("invalid MONGODB_PING_INTERVAL_SECONDS: %w", err)
-	}
-
-	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %w", err)
-	}
-
-	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CA_CERT_READ_INTERVAL_SECONDS: %w", err)
-	}
-
-	return &EnvConfig{
-		MongoURI:                  mongoURI,
-		MongoDatabase:             mongoDatabase,
-		MongoCollection:           mongoCollection,
-		TokenDatabase:             tokenDatabase,
-		TokenCollection:           tokenCollection,
-		TotalTimeoutSeconds:       totalTimeoutSeconds,
-		IntervalSeconds:           intervalSeconds,
-		TotalCACertTimeoutSeconds: totalCACertTimeoutSeconds,
-		IntervalCACertSeconds:     intervalCACertSeconds,
-	}, nil
-}
-
-// getEnvAsInt retrieves an environment variable as an integer with a default value
-func getEnvAsInt(name string, defaultValue int) (int, error) {
-	valueStr, exists := os.LookupEnv(name)
-	if !exists {
-		return defaultValue, nil
-	}
-
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return 0, fmt.Errorf("error converting %s to integer: %w", name, err)
-	}
-
-	if value <= 0 {
-		return 0, fmt.Errorf("value of %s must be a positive integer", name)
-	}
-
-	return value, nil
-}
-
-// NewMongoConfig creates a MongoDB configuration from environment config and certificate paths
-func NewMongoConfig(envConfig *EnvConfig, mongoClientCertMountPath string) storewatcher.MongoDBConfig {
-	return storewatcher.MongoDBConfig{
-		URI:        envConfig.MongoURI,
-		Database:   envConfig.MongoDatabase,
-		Collection: envConfig.MongoCollection,
-		ClientTLSCertConfig: storewatcher.MongoDBClientTLSCertConfig{
-			TlsCertPath: filepath.Join(mongoClientCertMountPath, "tls.crt"),
-			TlsKeyPath:  filepath.Join(mongoClientCertMountPath, "tls.key"),
-			CaCertPath:  filepath.Join(mongoClientCertMountPath, "ca.crt"),
-		},
-		TotalPingTimeoutSeconds:    envConfig.TotalTimeoutSeconds,
-		TotalPingIntervalSeconds:   envConfig.IntervalSeconds,
-		TotalCACertTimeoutSeconds:  envConfig.TotalCACertTimeoutSeconds,
-		TotalCACertIntervalSeconds: envConfig.IntervalCACertSeconds,
-	}
-}
-
-// NewTokenConfig creates a token configuration from environment config
-func NewTokenConfig(envConfig *EnvConfig) storewatcher.TokenConfig {
-	return storewatcher.TokenConfig{
-		ClientName:      "node-draining-module",
-		TokenDatabase:   envConfig.TokenDatabase,
-		TokenCollection: envConfig.TokenCollection,
-	}
-}
-
-// NewMongoPipeline creates the MongoDB change stream pipeline for watching quarantine events
-func NewMongoPipeline() mongo.Pipeline {
-	return mongo.Pipeline{
-		bson.D{
-			bson.E{Key: "$match", Value: bson.D{
-				bson.E{Key: "operationType", Value: "update"},
-				bson.E{Key: "$or", Value: bson.A{
-					bson.D{bson.E{Key: "updateDescription.updatedFields",
-						Value: bson.D{bson.E{Key: "healtheventstatus.nodequarantined", Value: store.Quarantined}}}},
-					bson.D{bson.E{Key: "updateDescription.updatedFields",
-						Value: bson.D{bson.E{Key: "healtheventstatus.nodequarantined", Value: store.AlreadyQuarantined}}}},
-					bson.D{bson.E{Key: "updateDescription.updatedFields",
-						Value: bson.D{bson.E{Key: "healtheventstatus.nodequarantined", Value: store.UnQuarantined}}}},
-				}},
-			}},
-		},
-	}
+	return nil
 }

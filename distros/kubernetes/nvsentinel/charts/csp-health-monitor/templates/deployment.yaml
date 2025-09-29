@@ -24,14 +24,14 @@ spec:
       {{- include "csp-health-monitor.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with ((.Values.global).podAnnotations | default .Values.podAnnotations) }}
+      {{- with (.Values.global.podAnnotations | default .Values.podAnnotations) }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
         {{- include "csp-health-monitor.selectorLabels" . | nindent 8 }}
     spec:
-      {{- with ((.Values.global).imagePullSecrets | default .Values.imagePullSecrets) }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -53,18 +53,18 @@ spec:
           type: DirectoryOrCreate
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ ((.Values.global).cspHealthMonitor).image.repository | default "ghcr.io/nvidia/nvsentinel-csp-health-monitor" }}:{{ ((.Values.global).image).tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ ((.Values.global).cspHealthMonitor).image.pullPolicy | default "IfNotPresent" }}
+          image: "{{ .Values.global.cspHealthMonitor.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.global.cspHealthMonitor.image.pullPolicy }}
           command: ["/app/csp-health-monitor"]
           args:
           - "--config=/etc/config/config.toml"
-          - "--metrics-port={{ ((.Values.global).metricsPort) | default 2112 }}"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
+          - "--metrics-port={{ .Values.global.metricsPort }}"
+          - "-v={{ .Values.logLevel }}"
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           ports:
             - name: metrics
-              containerPort: {{ ((.Values.global).metricsPort) | default 2112 }}
+              containerPort: {{ .Values.global.metricsPort }}
               protocol: TCP
           volumeMounts:
           - name: config-volume
@@ -72,25 +72,22 @@ spec:
           - name: mongo-app-client-cert
             mountPath: {{ .Values.clientCertMountPath }}
             readOnly: true
-          env:
-            - name: LOG_LEVEL
-              value: "{{ .Values.logLevel }}"
           envFrom:
             - configMapRef:
                 name: mongodb-config
                 optional: true
 
         - name: maintenance-notifier
-          image: "{{ ((.Values.global).cspHealthMonitor).image.repository | default "ghcr.io/nvidia/nvsentinel-csp-health-monitor" }}:{{ ((.Values.global).image).tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ ((.Values.global).cspHealthMonitor).image.pullPolicy | default "IfNotPresent" }}
+          image: "{{ .Values.global.cspHealthMonitor.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.global.cspHealthMonitor.image.pullPolicy }}
           securityContext:
             runAsUser: 0
           command: ["/app/maintenance-notifier"]
           args:
           - "--config=/etc/config/config.toml"
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
           - "--uds-path={{ .Values.udsPath }}"
           - "--metrics-port={{ .Values.quarantineTriggerEngine.metricsPort }}"
+          - "-v={{ .Values.quarantineTriggerEngine.logLevel | default .Values.logLevel }}"
           resources:
             {{- toYaml .Values.quarantineTriggerEngine.resources | default .Values.resources | nindent 12 }}
           ports:
@@ -105,23 +102,20 @@ spec:
             readOnly: true
           - name: platform-connector-uds
             mountPath: /run/nvsentinel
-          env:
-            - name: LOG_LEVEL
-              value: "{{ .Values.quarantineTriggerEngine.logLevel | default .Values.logLevel }}"
           envFrom:
             - configMapRef:
                 name: mongodb-config
                 optional: true
       restartPolicy: Always
-      {{- with (((.Values.global).systemNodeSelector) | default .Values.nodeSelector) }}
+      {{- with (.Values.global.systemNodeSelector | default .Values.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with (((.Values.global).affinity) | default .Values.affinity) }}
+      {{- with (.Values.global.affinity | default .Values.affinity) }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with (((.Values.global).systemNodeTolerations) | default .Values.tolerations) }}
+      {{- with (.Values.global.systemNodeTolerations | default .Values.tolerations) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

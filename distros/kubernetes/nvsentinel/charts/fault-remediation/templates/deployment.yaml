@@ -24,54 +24,30 @@ spec:
       {{- include "fault-remediation-module.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with ((.Values.global).podAnnotations | default .Values.podAnnotations) }}
+      {{- with (.Values.global.podAnnotations | default .Values.podAnnotations) }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
         {{- include "fault-remediation-module.selectorLabels" . | nindent 8 }}
     spec:
-      {{- with ((.Values.global).imagePullSecrets | default .Values.imagePullSecrets) }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "fault-remediation-module.serviceAccountName" . }}
+      serviceAccountName: {{ include "nvsentinel.serviceAccountName" . }}
       containers:
         - name: fault-remediation
-          env:
-          - name: MAINTENANCE_NAMESPACE
-            value: {{ .Values.maintenanceResource.namespace }}
-          - name: MAINTENANCE_VERSION
-            value: {{ .Values.maintenanceResource.version }}
-          - name: MAINTENANCE_API_GROUP
-            value: {{ .Values.maintenanceResource.apiGroup }}
-
-          image: "{{ ((.Values.global).faultRemediationModule).image.repository | default "ghcr.io/nvidia/nvsentinel-fault-remediation-module" }}:{{ ((.Values.global).image).tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ ((.Values.global).faultRemediationModule).image.pullPolicy | default "IfNotPresent" }}
+          image: "{{ .Values.global.faultRemediationModule.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.global.faultRemediationModule.image.pullPolicy | default "IfNotPresent" }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           args:
-          - "--mongo-client-cert-mount-path={{ .Values.clientCertMountPath }}"
-          - "--dry-run={{ ((.Values.global).dryRun) | default false }}"
+          - "--dry-run={{ .Values.global.dryRun }}"
+          - "-v=4"
           ports:
             - name: metrics
-              containerPort: {{ ((.Values.global).metricsPort) | default 2112 }}
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: metrics
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: metrics
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
+              containerPort: {{ .Values.global.metricsPort }}
           volumeMounts:
           - name: mongo-app-client-cert
             mountPath: {{ .Values.clientCertMountPath }}
@@ -85,6 +61,8 @@ spec:
             value: {{ .Values.maintenanceResource.version }}
           - name: MAINTENANCE_API_GROUP
             value: {{ .Values.maintenanceResource.apiGroup }}
+          - name: MONGODB_CLIENT_CERT_MOUNT_PATH
+            value: {{ .Values.clientCertMountPath }}
           - name: TEMPLATE_MOUNT_PATH
             value: {{ .Values.maintenanceResource.template.mountPath }}
           - name: TEMPLATE_FILE_NAME
@@ -95,8 +73,6 @@ spec:
             value: {{ .Values.maintenanceResource.template.mountPath }}/{{ .Values.logCollector.manifestFileName }}
           - name: ENABLE_GCP_SOS_COLLECTION
             value: "{{ .Values.logCollector.enableGcpSosCollection }}"
-          - name: LOG_LEVEL
-            value: "{{ .Values.logLevel }}"
           envFrom:
             - configMapRef:
                 name: mongodb-config
@@ -117,15 +93,15 @@ spec:
               path: {{ .Values.logCollector.manifestFileName }}
             {{- end }}
       restartPolicy: Always
-      {{- with (((.Values.global).systemNodeSelector) | default .Values.nodeSelector) }}
+      {{- with (.Values.global.systemNodeSelector | default .Values.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with (((.Values.global).affinity) | default .Values.affinity) }}
+      {{- with (.Values.global.affinity | default .Values.affinity) }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with (((.Values.global).systemNodeTolerations) | default .Values.tolerations) }}
+      {{- with (.Values.global.systemNodeTolerations | default .Values.tolerations) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -24,28 +24,31 @@ ENV CGO_ENABLED=0
 
 WORKDIR /go/src
 
-# Copy go.mod and go.sum files for all dependencies first
+# Copy go modules and dependencies
+COPY node-drainer-module/go.mod node-drainer-module/go.sum ./node-drainer-module/
+COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
 COPY data-models/go.mod data-models/go.sum ./data-models/
 COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
 COPY statemanager/go.mod statemanager/go.sum ./statemanager/
-COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
-COPY commons/go.mod commons/go.sum ./commons/
-COPY node-drainer-module/go.mod node-drainer-module/go.sum ./node-drainer-module/
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
+COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+
+# Copy dependency source code
+COPY store-client-sdk/ ./store-client-sdk/
+COPY data-models/ ./data-models/
+COPY platform-connectors/ ./platform-connectors/
+COPY statemanager/ ./statemanager/
+COPY health-monitors/ ./health-monitors/
+
+# Copy main module source
+COPY node-drainer-module/ ./node-drainer-module/
 
 WORKDIR /go/src/node-drainer-module
 
 # download dependencies with authentication
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
-
-# Copy the source code after go mod download
-COPY node-drainer-module/ .
-COPY data-models/ ../data-models/
-COPY platform-connectors/ ../platform-connectors/
-COPY statemanager/ ../statemanager/
-COPY store-client-sdk/ ../store-client-sdk/
-COPY commons/ ../commons/
-
+    
 RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -o nodedrainer main.go
 

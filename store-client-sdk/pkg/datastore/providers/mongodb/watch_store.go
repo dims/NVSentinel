@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package storewatcher
+package mongodb
 
 import (
 	"context"
@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -33,6 +34,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"k8s.io/klog/v2"
 )
 
 type MongoDBClientTLSCertConfig struct {
@@ -53,6 +55,8 @@ type MongoDBConfig struct {
 	TotalCACertIntervalSeconds       int
 	ChangeStreamRetryDeadlineSeconds int
 	ChangeStreamRetryIntervalSeconds int
+	EventChannelBufferSize           int
+	DedupWindowSeconds               int // De-duplication window in seconds (default 5)
 }
 
 // TokenConfig holds the token-specific configuration.
@@ -64,13 +68,14 @@ type TokenConfig struct {
 
 // Struct for ResumeToken retrieval
 type TokenDoc struct {
-	ResumeToken bson.Raw `bson:"resumeToken"`
+	ResumeToken bson.Raw  `bson:"resumeToken"`
+	Timestamp   time.Time `bson:"timestamp"` // Track when token was saved
 }
 
 type ChangeStreamWatcher struct {
 	client                    *mongo.Client
 	changeStream              *mongo.ChangeStream
-	eventChannel              chan bson.M
+	eventChannel              chan datastore.EventWithToken
 	resumeTokenCol            *mongo.Collection
 	clientName                string
 	mu                        sync.Mutex
@@ -150,19 +155,35 @@ func NewChangeStreamWatcher(
 
 	// Check if the resume token exists
 	err = tokenColl.FindOne(ctx, bson.M{"clientName": tokenConfig.ClientName}).Decode(&storedToken)
-	if err == nil {
-		if len(storedToken.ResumeToken) > 0 {
-			slog.Info("ResumeToken found", "token", storedToken.ResumeToken)
+
+	switch {
+	case err == nil && len(storedToken.ResumeToken) > 0:
+		// Check if token is too old to prevent event replay after long downtime
+		tokenAge := time.Since(storedToken.Timestamp)
+		if tokenAge > 5*time.Minute {
+			klog.Warningf("Resume token for client '%s' is %v old (> 5min), starting fresh to avoid event replay",
+				tokenConfig.ClientName, tokenAge)
+			// Start from current time instead of old resume token
+			opts.SetStartAtOperationTime(&primitive.Timestamp{T: uint32(time.Now().Unix())}) // #nosec G115
+		} else {
 			opts.SetResumeAfter(storedToken.ResumeToken)
 
 			hasResumeToken = true
-		} else {
-			slog.Info("No valid resume token found, starting stream from the beginning..")
+
+			klog.V(2).Infof("Resume token found for client '%s', resuming from saved position", tokenConfig.ClientName)
 		}
-	} else if !errors.Is(err, mongo.ErrNoDocuments) {
+	case err == nil:
+		klog.Warningf("Resume token document exists but ResumeToken field is EMPTY for client '%s'",
+			tokenConfig.ClientName)
+		klog.Info("No valid resume token found, starting stream from the beginning..")
+	case !errors.Is(err, mongo.ErrNoDocuments):
 		// if no document was found, it is a normal case if it's the first time the client is connecting
+		klog.Errorf("Error retrieving resume token: %v", err)
 		return nil, fmt.Errorf("error retrieving resume token from DB %s and collection %s: %w",
 			tokenConfig.TokenDatabase, tokenConfig.TokenCollection, err)
+	default:
+		klog.V(2).Infof("No resume token found for client '%s' (first run), starting from beginning",
+			tokenConfig.ClientName)
 	}
 
 	// Open the change stream with appropriate read preference based on resume token presence
@@ -171,10 +192,17 @@ func NewChangeStreamWatcher(
 		return nil, fmt.Errorf("failed to open change stream: %w", err)
 	}
 
+	// Use UNBUFFERED channel (size 0) like main branch
+	// This provides natural backpressure: producer blocks when consumer is slow
+	bufferSize := 0
+
+	klog.V(2).Infof("Creating UNBUFFERED event channel (size: %d) for client: %s (matches main branch)",
+		bufferSize, tokenConfig.ClientName)
+
 	watcher := &ChangeStreamWatcher{
 		client:                    client,
 		changeStream:              cs,
-		eventChannel:              make(chan bson.M),
+		eventChannel:              make(chan datastore.EventWithToken, bufferSize),
 		resumeTokenCol:            tokenColl,
 		clientName:                tokenConfig.ClientName,
 		resumeTokenUpdateTimeout:  totalTimeout,
@@ -305,29 +333,62 @@ func (w *ChangeStreamWatcher) Start(ctx context.Context) {
 
 					w.mu.Lock()
 					err := w.changeStream.Decode(&event)
+					// Capture the resume token WITH this event to ensure consistency
+					// This prevents race conditions where the token reflects a later event
+					token := w.changeStream.ResumeToken()
 					w.mu.Unlock()
 
 					if err != nil {
-						slog.Info("Failed to decode change stream event", "error", err)
+						klog.Errorf("Failed to decode change stream event: %v", err)
 						continue
 					}
-					w.eventChannel <- event
+
+					// Convert bson.M to map[string]interface{} and bson.Raw to []byte
+					eventMap := make(map[string]interface{})
+					for k, v := range event {
+						eventMap[k] = v
+					}
+
+					// Create event with its token (converting bson.Raw to []byte)
+					eventWithToken := datastore.EventWithToken{
+						Event:       eventMap,
+						ResumeToken: []byte(token),
+					}
+
+					// BLOCKING send (like main branch) - provides natural backpressure
+					// This prevents memory buildup and ensures events are processed in order
+					w.eventChannel <- eventWithToken
 				} else if csErr != nil {
-					slog.Error("Failed to watch change stream", "error", csErr)
+					klog.Errorf("Change stream error: %v", csErr)
 				}
 			}
 		}
 	}(ctx)
 }
 
-func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
-	token := w.changeStream.ResumeToken()
+// MarkProcessed marks the event as processed by saving its resume token
+// Token is passed as parameter - the one captured WITH the event being processed
+// This ensures we save the correct position, not the producer's current position
+func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
+	// Convert []byte back to bson.Raw for MongoDB operations
+	bsonToken := bson.Raw(token)
+
+	// Check if token is nil or empty
+	if bsonToken == nil {
+		klog.Warningf("ResumeToken is NIL for client %s - cannot save!", w.clientName)
+		return fmt.Errorf("resume token is nil for client %s", w.clientName)
+	}
+
+	if len(token) == 0 {
+		klog.Warningf("ResumeToken is EMPTY for client %s - cannot save!", w.clientName)
+		return fmt.Errorf("resume token is empty for client %s", w.clientName)
+	}
 
 	timeout := time.Now().Add(w.resumeTokenUpdateTimeout)
 
 	var err error
 
-	slog.Info("Attempting to store resume token", "client", w.clientName)
+	klog.V(3).Infof("Attempting to store resume token for client %s", w.clientName)
 
 	for {
 		if time.Now().After(timeout) {
@@ -337,10 +398,14 @@ func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 		_, err = w.resumeTokenCol.UpdateOne(
 			ctx,
 			bson.M{"clientName": w.clientName},
-			bson.M{"$set": bson.M{"resumeToken": token}},
+			bson.M{"$set": bson.M{
+				"resumeToken": bsonToken,
+				"timestamp":   time.Now(),
+			}},
 			options.Update().SetUpsert(true),
 		)
 		if err == nil {
+			klog.V(3).Infof("Resume token saved successfully for client %s", w.clientName)
 			return nil
 		}
 
@@ -350,7 +415,7 @@ func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 	}
 }
 
-func (w *ChangeStreamWatcher) Events() <-chan bson.M {
+func (w *ChangeStreamWatcher) Events() <-chan datastore.EventWithToken {
 	return w.eventChannel
 }
 
@@ -383,6 +448,7 @@ func (w *ChangeStreamWatcher) GetUnprocessedEventCount(ctx context.Context, last
 }
 
 func (w *ChangeStreamWatcher) Close(ctx context.Context) error {
+	// Close the change stream
 	w.mu.Lock()
 	err := w.changeStream.Close(ctx)
 	w.mu.Unlock()
@@ -392,11 +458,9 @@ func (w *ChangeStreamWatcher) Close(ctx context.Context) error {
 		slog.Info("ChangeStreamWatcher event channel closed", "client", w.clientName)
 	})
 
-	if err != nil {
-		return fmt.Errorf("failed to close change stream for client %s: %w", w.clientName, err)
-	}
+	klog.Infof("Change stream watcher for client %s closed successfully", w.clientName)
 
-	return nil
+	return err
 }
 
 func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.Client, mongoDbName string,
@@ -415,7 +479,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 
 		var result bson.M
 
-		err = client.Database(mongoDbName).RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Decode(&result)
+		err = client.Database(mongoDbName).RunCommand(ctx, bson.D{bson.E{Key: "ping", Value: 1}}).Decode(&result)
 		if err == nil {
 			slog.Info("Successfully pinged database to confirm connectivity", "database", mongoDbName)
 			break
@@ -424,7 +488,8 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 		time.Sleep(pingInterval)
 	}
 
-	coll, err := client.Database(mongoDbName).ListCollectionNames(ctx, bson.D{{Key: "name", Value: mongoDbCollection}})
+	coll, err := client.Database(mongoDbName).ListCollectionNames(ctx,
+		bson.D{bson.E{Key: "name", Value: mongoDbCollection}})
 
 	switch {
 	case err != nil:

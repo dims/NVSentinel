@@ -83,6 +83,10 @@ func (r *K8sConnector) FetchAndProcessHealthMetric(ctx context.Context) {
 			return
 		default:
 			healthEvents := r.ringBuffer.Dequeue()
+			// Check for nil to prevent panic during shutdown
+			if healthEvents == nil {
+				continue
+			}
 			if err := r.processHealthEvents(ctx, healthEvents); err != nil {
 				slog.Error("Not able to process healthEvent", "error", err)
 				r.ringBuffer.HealthMetricEleProcessingFailed(healthEvents)
