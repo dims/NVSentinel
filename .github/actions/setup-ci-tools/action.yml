@@ -130,12 +130,13 @@ runs:
           echo "Installing Protocol Buffers ${{ inputs.protobuf-version }}"
           PROTOBUF_VERSION="${{ inputs.protobuf-version }}"
           PROTOBUF_VERSION_NO_V="${PROTOBUF_VERSION#v}"
-          wget -q https://github.com/protocolbuffers/protobuf/releases/download/${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION_NO_V}-linux-x86_64.zip
-          unzip protoc-${PROTOBUF_VERSION_NO_V}-linux-x86_64.zip -d protoc-${PROTOBUF_VERSION_NO_V}-linux-x86_64
-          sudo cp protoc-${PROTOBUF_VERSION_NO_V}-linux-x86_64/bin/protoc /usr/local/bin/
+          ARCH=$(case $(uname -m) in x86_64) echo x86_64;; aarch64) echo aarch_64;; *) echo $(uname -m);; esac)
+          wget -q https://github.com/protocolbuffers/protobuf/releases/download/${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION_NO_V}-linux-${ARCH}.zip
+          unzip protoc-${PROTOBUF_VERSION_NO_V}-linux-${ARCH}.zip -d protoc-${PROTOBUF_VERSION_NO_V}-linux-${ARCH}
+          sudo cp protoc-${PROTOBUF_VERSION_NO_V}-linux-${ARCH}/bin/protoc /usr/local/bin/
           sudo mkdir -p /usr/local/include/google
-          sudo cp -r protoc-${PROTOBUF_VERSION_NO_V}-linux-x86_64/include/google /usr/local/include/
-          rm -rf protoc-${PROTOBUF_VERSION_NO_V}-linux-x86_64*
+          sudo cp -r protoc-${PROTOBUF_VERSION_NO_V}-linux-${ARCH}/include/google /usr/local/include/
+          rm -rf protoc-${PROTOBUF_VERSION_NO_V}-linux-${ARCH}*
         fi
         go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ inputs.protoc-gen-go-version }}
         go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ inputs.protoc-gen-go-grpc-version }}
@@ -145,7 +146,8 @@ runs:
       if: inputs.install-dcgm == 'true'
       shell: bash
       run: |
-        wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb
+        ARCH=$(case $(uname -m) in x86_64) echo x86_64;; aarch64) echo arm64;; *) echo $(uname -m);; esac)
+        wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/${ARCH}/cuda-keyring_1.1-1_all.deb
         sudo dpkg -i cuda-keyring_1.1-1_all.deb
         rm cuda-keyring_1.1-1_all.deb
         sudo apt-get update -qq
@@ -168,7 +170,8 @@ runs:
           echo "shellcheck already installed from cache"
         else
           echo "Installing shellcheck ${{ inputs.shellcheck-version }}"
-          curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${{ inputs.shellcheck-version }}/shellcheck-${{ inputs.shellcheck-version }}.linux.x86_64.tar.xz" | \
+          ARCH=$(case $(uname -m) in x86_64) echo x86_64;; aarch64) echo aarch64;; *) echo $(uname -m);; esac)
+          curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${{ inputs.shellcheck-version }}/shellcheck-${{ inputs.shellcheck-version }}.linux.${ARCH}.tar.xz" | \
             sudo tar -xJ --wildcards -C /usr/local/bin/ --strip-components=1 "*/shellcheck"
           sudo chmod +x /usr/local/bin/shellcheck
         fi
