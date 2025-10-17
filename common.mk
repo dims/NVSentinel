@@ -29,13 +29,18 @@ SAFE_REF_NAME := $(if $(SAFE_REF_NAME),$(SAFE_REF_NAME),local)
 BUILDX_BUILDER ?= nvsentinel-builder
 PLATFORMS ?= linux/arm64,linux/amd64
 
-# Cache configuration (can be disabled via environment variables)
-DISABLE_REGISTRY_CACHE ?= false
-CACHE_FROM_ARG := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME))
-CACHE_TO_ARG := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME),mode=max)
-
 # Auto-detect current module name from directory
 MODULE_NAME := $(shell basename $(CURDIR))
+
+# Cache configuration (can be disabled via environment variables)
+DISABLE_REGISTRY_CACHE ?= false
+ifeq ($(DISABLE_REGISTRY_CACHE),true)
+CACHE_FROM_ARG :=
+CACHE_TO_ARG :=
+else
+CACHE_FROM_ARG := --cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)
+CACHE_TO_ARG := --cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME),mode=max
+endif
 
 # Repository root path calculation (works from any subdirectory depth)
 REPO_ROOT := $(shell git rev-parse --show-toplevel)

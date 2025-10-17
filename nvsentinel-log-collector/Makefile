@@ -13,10 +13,17 @@ DOCKER_LOAD_ARG ?= --load
 
 # Cache configuration (can be disabled via environment variables)
 DISABLE_REGISTRY_CACHE ?= false
-CACHE_FROM_ARG_LOG := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:log-collector)
-CACHE_TO_ARG_LOG := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:log-collector,mode=max)
-CACHE_FROM_ARG_CLEANUP := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:file-server-cleanup)
-CACHE_TO_ARG_CLEANUP := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:file-server-cleanup,mode=max)
+ifeq ($(DISABLE_REGISTRY_CACHE),true)
+CACHE_FROM_ARG_LOG :=
+CACHE_TO_ARG_LOG :=
+CACHE_FROM_ARG_CLEANUP :=
+CACHE_TO_ARG_CLEANUP :=
+else
+CACHE_FROM_ARG_LOG := --cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:log-collector
+CACHE_TO_ARG_LOG := --cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:log-collector,mode=max
+CACHE_FROM_ARG_CLEANUP := --cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:file-server-cleanup
+CACHE_TO_ARG_CLEANUP := --cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:file-server-cleanup,mode=max
+endif
 
 # Default target
 .PHONY: all

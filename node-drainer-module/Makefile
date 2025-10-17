@@ -58,7 +58,7 @@ docker-build-with-cache: setup-buildx
 		$(DOCKER_EXTRA_ARGS) \
 		$(DOCKER_LOAD_ARG) \
 		-t $(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-$(MODULE_NAME):$(SAFE_REF_NAME) \
-		-f $(MODULE_NAME)/Dockerfile \
+		-f $(DOCKER_MODULE_PATH)/Dockerfile \
 		.
 
 # =============================================================================

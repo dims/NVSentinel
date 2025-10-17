@@ -42,10 +42,17 @@ LINT_EXTRA_FLAGS :=
 include ../../common.mk
 
 # Cache configuration for specialized builds (respect DISABLE_REGISTRY_CACHE)
-CACHE_FROM_ARG_DCGM3 := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-3)
-CACHE_TO_ARG_DCGM3 := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-3,mode=max)
-CACHE_FROM_ARG_DCGM4 := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-4)
-CACHE_TO_ARG_DCGM4 := $(if $(filter true,$(DISABLE_REGISTRY_CACHE)),,--cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-4,mode=max)
+ifeq ($(DISABLE_REGISTRY_CACHE),true)
+CACHE_FROM_ARG_DCGM3 :=
+CACHE_TO_ARG_DCGM3 :=
+CACHE_FROM_ARG_DCGM4 :=
+CACHE_TO_ARG_DCGM4 :=
+else
+CACHE_FROM_ARG_DCGM3 := --cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-3
+CACHE_TO_ARG_DCGM3 := --cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-3,mode=max
+CACHE_FROM_ARG_DCGM4 := --cache-from=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-4
+CACHE_TO_ARG_DCGM4 := --cache-to=type=registry,ref=$(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-buildcache:$(MODULE_NAME)-4,mode=max
+endif
 
 # =============================================================================
 # DEFAULT TARGET
