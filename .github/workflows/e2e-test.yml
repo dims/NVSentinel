@@ -14,6 +14,14 @@
 
 name: E2E Tests
 
+# This workflow runs end-to-end tests on both AMD64 and ARM64 architectures in parallel
+# to ensure compatibility across different hardware platforms.
+#
+# Configuration:
+# - Set RUNNER_ARCH_LARGE_AMD64 variable to override default AMD64 runner
+# - Set RUNNER_ARCH_LARGE_ARM64 variable to override default ARM64 runner
+# - Each architecture gets its own isolated cluster and test artifacts
+
 on:
   push:
     branches:
@@ -40,7 +48,20 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   e2e-test:
-    runs-on: linux-amd64-cpu32
+    # Run E2E tests on both AMD64 and ARM64 architectures in parallel
+    strategy:
+      fail-fast: false  # Allow both architectures to complete even if one fails
+      matrix:
+        include:
+          - arch: amd64
+            runner: ${{ vars.RUNNER_ARCH_LARGE_AMD64 || 'linux-amd64-cpu32' }}
+            arch_name: "AMD64"
+          - arch: arm64
+            runner: ${{ vars.RUNNER_ARCH_LARGE_ARM64 || 'linux-arm64-cpu32' }}
+            arch_name: "ARM64"
+
+    name: "E2E Tests (${{ matrix.arch_name }})"
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     needs: prepare-environment
     steps:
@@ -100,9 +121,18 @@ jobs:
             /usr/local/bin/kind
             /usr/local/bin/kubectl
             /usr/local/bin/tilt
-          key: ${{ runner.os }}-e2e-tools-${{ env.KIND_VERSION }}-${{ env.CTLPTL_VERSION }}-${{ env.TILT_VERSION }}
+          key: ${{ runner.os }}-${{ runner.arch }}-e2e-tools-${{ env.KIND_VERSION }}-${{ env.CTLPTL_VERSION }}-${{ env.TILT_VERSION }}
           restore-keys: |
-            ${{ runner.os }}-e2e-tools-
+            ${{ runner.os }}-${{ runner.arch }}-e2e-tools-
+
+      - name: Detect runner architecture
+        run: |
+          echo "Matrix configuration: ${{ matrix.arch_name }} (${{ matrix.arch }})"
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Runner architecture: ${{ runner.arch }}"
+          echo "System architecture (uname -m): $(uname -m)"
+          echo "Cache key will be: ${{ runner.os }}-${{ runner.arch }}-e2e-tools-${{ env.KIND_VERSION }}-${{ env.CTLPTL_VERSION }}-${{ env.TILT_VERSION }}"
 
       - name: Install E2E testing tools
         run: |
@@ -112,7 +142,8 @@ jobs:
             echo "ctlptl v${CTLPTL_VERSION} already installed from cache"
           else
             echo "Installing ctlptl v${CTLPTL_VERSION}..."
-            curl -fsSL https://github.com/tilt-dev/ctlptl/releases/download/v${CTLPTL_VERSION}/ctlptl.${CTLPTL_VERSION}.linux.x86_64.tar.gz | sudo tar -xzv -C /usr/local/bin ctlptl
+            ARCH=$(case $(uname -m) in x86_64) echo x86_64;; aarch64|arm64) echo arm64;; *) echo $(uname -m);; esac)
+            curl -fsSL https://github.com/tilt-dev/ctlptl/releases/download/v${CTLPTL_VERSION}/ctlptl.${CTLPTL_VERSION}.linux.${ARCH}.tar.gz | sudo tar -xzv -C /usr/local/bin ctlptl
           fi
 
           # Install Kind (if not cached)
@@ -121,7 +152,8 @@ jobs:
             echo "Kind v${KIND_VERSION} already installed from cache"
           else
             echo "Installing Kind v${KIND_VERSION}..."
-            curl -Lo ./kind https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-amd64
+            ARCH=$(case $(uname -m) in x86_64) echo amd64;; aarch64|arm64) echo arm64;; *) echo $(uname -m);; esac)
+            curl -Lo ./kind https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-${ARCH}
             chmod +x ./kind
             sudo mv ./kind /usr/local/bin/kind
           fi
@@ -131,7 +163,8 @@ jobs:
             echo "kubectl already installed from cache"
           else
             echo "Installing kubectl..."
-            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            ARCH=$(case $(uname -m) in x86_64) echo amd64;; aarch64|arm64) echo arm64;; *) echo $(uname -m);; esac)
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl"
             chmod +x kubectl
             sudo mv ./kubectl /usr/local/bin/kubectl
           fi
@@ -142,8 +175,9 @@ jobs:
             echo "Tilt v${TILT_VERSION} already installed from cache"
           else
             echo "Installing Tilt v${TILT_VERSION}..."
+            ARCH=$(case $(uname -m) in x86_64) echo x86_64;; aarch64|arm64) echo arm64;; *) echo $(uname -m);; esac)
             TEMP_DIR=$(mktemp -d)
-            curl -fsSL https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.x86_64.tar.gz | tar -xzv -C "$TEMP_DIR" tilt
+            curl -fsSL https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.${ARCH}.tar.gz | tar -xzv -C "$TEMP_DIR" tilt
             sudo mv "$TEMP_DIR/tilt" /usr/local/bin/
             rm -rf "$TEMP_DIR"
           fi
@@ -152,7 +186,7 @@ jobs:
           echo "Verifying tool installations:"
           echo "ctlptl: $(ctlptl version)"
           echo "Kind: $(kind version)"
-          echo "kubectl: $(kubectl version --client --short)"
+          echo "kubectl: $(kubectl version --client)"
           echo "Tilt: $(tilt version)"
           echo "Docker: $(docker version --format '{{.Client.Version}}')"
 
@@ -174,6 +208,8 @@ jobs:
           NVCR_CONTAINER_REPO: ${{ needs.prepare-environment.outputs.nvcr_container_repo }}
           NGC_ORG: ${{ needs.prepare-environment.outputs.container_org }}
           CTLPTL_YAML: ctlptl-config.yaml
+          # Make cluster names unique per architecture to avoid conflicts in parallel runs
+          CLUSTER_NAME_SUFFIX: "-${{ matrix.arch }}"
         run: |
           make cluster-create
 
@@ -183,13 +219,15 @@ jobs:
           NVCR_CONTAINER_REPO: ${{ needs.prepare-environment.outputs.nvcr_container_repo }}
           NGC_ORG: ${{ needs.prepare-environment.outputs.container_org }}
           CTLPTL_YAML: ctlptl-config.yaml
+          # Use same cluster name suffix for consistency
+          CLUSTER_NAME_SUFFIX: "-${{ matrix.arch }}"
         run: |
           make e2e-test-ci
 
       - name: Upload test results
         uses: ./.github/actions/upload-test-artifacts
         with:
-          component-name: e2e-test
+          component-name: e2e-test-${{ matrix.arch }}
           file-paths: |
             tests/results/
             tests/*.log

@@ -33,7 +33,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     sudo \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL -o /usr/local/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
+RUN ARCH=$(case $(uname -m) in x86_64) echo amd64;; aarch64) echo arm64;; *) echo $(uname -m);; esac) && \
+    curl -fsSL -o /usr/local/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl \
   && chmod +x /usr/local/bin/kubectl
 
 RUN useradd -u 10001 -m nvsentinel
