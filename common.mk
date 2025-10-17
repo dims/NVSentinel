@@ -64,6 +64,7 @@ BINARY_SOURCE ?= .
 
 # Docker configuration (can be overridden per module)
 DOCKER_EXTRA_ARGS ?=
+DOCKER_LOAD_ARG ?= --load
 HAS_DOCKER ?= 1
 
 # Module type configuration (Go=1, Python=0 - Python modules override targets)
@@ -182,7 +183,7 @@ docker-build: setup-buildx
 		$(CACHE_FROM_ARG) \
 		$(CACHE_TO_ARG) \
 		$(DOCKER_EXTRA_ARGS) \
-		--load \
+		$(DOCKER_LOAD_ARG) \
 		-t $(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-$(MODULE_NAME):$(SAFE_REF_NAME) \
 		-f $(DOCKER_MODULE_PATH)/Dockerfile \
 		.
@@ -191,10 +192,10 @@ docker-build: setup-buildx
 docker-build-local: setup-buildx
 	@echo "Building Docker image for $(MODULE_NAME) (local, no remote cache)..."
 	cd $(REPO_ROOT) && docker buildx build \
-		--platform linux/amd64 \
+		--platform $(PLATFORMS) \
 		--network=host \
 		$(DOCKER_EXTRA_ARGS) \
-		--load \
+		$(DOCKER_LOAD_ARG) \
 		-t $(MODULE_NAME):local \
 		-f $(DOCKER_MODULE_PATH)/Dockerfile \
 		.

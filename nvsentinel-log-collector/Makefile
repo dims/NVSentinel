@@ -9,6 +9,7 @@ SAFE_REF_NAME ?= $(shell echo $(CI_COMMIT_REF_NAME) | sed 's/\//-/g')
 SAFE_REF_NAME := $(if $(SAFE_REF_NAME),$(SAFE_REF_NAME),local)
 BUILDX_BUILDER ?= nvsentinel-builder
 PLATFORMS ?= linux/arm64,linux/amd64
+DOCKER_LOAD_ARG ?= --load
 
 # Cache configuration (can be disabled via environment variables)
 DISABLE_REGISTRY_CACHE ?= false
@@ -90,6 +91,7 @@ docker-build-log-collector: setup-buildx
 		--network=host \
 		$(CACHE_FROM_ARG_LOG) \
 		$(CACHE_TO_ARG_LOG) \
+		$(DOCKER_LOAD_ARG) \
 		-t $(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-log-collector:$(SAFE_REF_NAME) \
 		.
 
@@ -103,6 +105,7 @@ docker-build-file-server-cleanup: setup-buildx
 		--network=host \
 		$(CACHE_FROM_ARG_CLEANUP) \
 		$(CACHE_TO_ARG_CLEANUP) \
+		$(DOCKER_LOAD_ARG) \
 		-f Dockerfile.cleanup \
 		-t $(NVCR_CONTAINER_REPO)/$(NGC_ORG)/nvsentinel-file-server-cleanup:$(SAFE_REF_NAME) \
 		.
