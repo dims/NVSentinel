@@ -132,6 +132,9 @@ jobs:
       - name: Execute build
         if: steps.should-build.outputs.build == 'true'
         uses: ./.github/actions/build-container
+        env:
+          # Disable registry cache for pull requests to avoid permission issues
+          DISABLE_REGISTRY_CACHE: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
         with:
           safe_ref_name: ${{ needs.prepare-environment.outputs.safe_ref_name }}
           nvcr_container_repo: ${{ needs.prepare-environment.outputs.nvcr_container_repo }}
