@@ -213,6 +213,12 @@ jobs:
         run: |
           make cluster-create
 
+      - name: Override MongoDB image for ARM64
+        if: matrix.arch == 'arm64'
+        run: |
+          sed -i 's/repository: "bitnamilegacy\/mongodb"/repository: "dlavrenuek\/bitnami-mongodb-arm"/' distros/kubernetes/nvsentinel/values-tilt.yaml
+          sed -i 's/tag: "8.0.3-debian-12-r1"/tag: "8.0.4"/' distros/kubernetes/nvsentinel/values-tilt.yaml
+
       - name: Run E2E tests
         env:
           SAFE_REF_NAME: ${{ needs.prepare-environment.outputs.safe_ref_name }}
