@@ -20,7 +20,7 @@
 FROM public.ecr.aws/docker/library/ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG KUBECTL_VERSION=v1.28.3
+ARG KUBECTL_VERSION=v1.34.1
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -33,8 +33,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     sudo \
   && rm -rf /var/lib/apt/lists/*
 
-RUN ARCH=$(case $(uname -m) in x86_64) echo amd64;; aarch64) echo arm64;; *) echo $(uname -m);; esac) && \
-    curl -fsSL -o /usr/local/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl \
+RUN ARCH=$(case $(uname -m) in x86_64) echo amd64;; aarch64|arm64) echo arm64;; *) echo $(uname -m);; esac) && \
+    curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl \
   && chmod +x /usr/local/bin/kubectl
 
 RUN useradd -u 10001 -m nvsentinel
