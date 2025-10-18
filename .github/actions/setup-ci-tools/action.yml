@@ -108,7 +108,7 @@ runs:
       run: |
         go install github.com/boumenot/gocover-cobertura@latest
         go install gotest.tools/gotestsum@latest
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin ${{ inputs.golangci-lint-version }}
+        curl -fsSL --retry 3 --keepalive-time 2 https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin ${{ inputs.golangci-lint-version }}
 
     - name: Cache Protocol Buffers
       uses: actions/cache@v4
@@ -171,7 +171,7 @@ runs:
         else
           echo "Installing shellcheck ${{ inputs.shellcheck-version }}"
           ARCH=$(case $(uname -m) in x86_64) echo x86_64;; aarch64) echo aarch64;; *) echo $(uname -m);; esac)
-          curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${{ inputs.shellcheck-version }}/shellcheck-${{ inputs.shellcheck-version }}.linux.${ARCH}.tar.xz" | \
+          curl -fsSL --retry 3 --keepalive-time 2 "https://github.com/koalaman/shellcheck/releases/download/${{ inputs.shellcheck-version }}/shellcheck-${{ inputs.shellcheck-version }}.linux.${ARCH}.tar.xz" | \
             sudo tar -xJ --wildcards -C /usr/local/bin/ --strip-components=1 "*/shellcheck"
           sudo chmod +x /usr/local/bin/shellcheck
         fi
