@@ -32,8 +32,70 @@ jobs:
   prepare-environment:
     uses: ./.github/workflows/prepare-environment.yml
 
-  analyze:
-    name: Analyze Go code with CodeQL
+  codeql-pr-analysis:
+    if: startsWith(github.ref, 'refs/heads/pull-request/')
+    name: CodeQL PR Analysis
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 360
+    needs: prepare-environment
+    permissions:
+      security-events: write
+      packages: read
+      pull-requests: write   # Required for posting comments
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup build environment
+      uses: ./.github/actions/setup-build-env
+      with:
+        go-version: ${{ needs.prepare-environment.outputs.go_version }}
+        python-version: ${{ needs.prepare-environment.outputs.python_version }}
+        poetry-version: ${{ needs.prepare-environment.outputs.poetry_version }}
+        golangci-lint-version: ${{ needs.prepare-environment.outputs.golangci_lint_version }}
+        protobuf-version: ${{ needs.prepare-environment.outputs.protobuf_version }}
+        protoc-gen-go-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_version }}
+        protoc-gen-go-grpc-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_grpc_version }}
+        shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: go
+        build-mode: manual
+      env:
+        CODEQL_EXTRACTOR_GO_BUILD_TRACING: on
+
+    - name: Build with CodeQL
+      run: |
+        make build-all
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: "/language:go"
+
+    - name: Post CodeQL Results to PR
+      if: startsWith(github.ref, 'refs/heads/pull-request/')
+      run: |
+        PR_NUM="${{ github.ref }}"
+        PR_NUM="${PR_NUM##*/}"
+
+        ALERTS=$(gh api "repos/${{ github.repository }}/code-scanning/alerts?ref=${{ github.ref }}&state=open" --jq 'length')
+
+        if [[ "$ALERTS" -eq 0 ]]; then
+          REPORT="## 🛡️ CodeQL Analysis\n✅ No security issues found"
+        else
+          REPORT="## 🛡️ CodeQL Analysis\n🚨 Found **$ALERTS** security alert(s)\n\n🔗 [View details](https://github.com/${{ github.repository }}/security/code-scanning?query=is%3Aopen+branch%3A${{ github.ref_name }})"
+        fi
+
+        echo -e "$REPORT" | gh pr comment "$PR_NUM" --body-file=-
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql-baseline-analysis:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    name: CodeQL Baseline Analysis
     runs-on: linux-amd64-cpu4
     timeout-minutes: 360
     needs: prepare-environment
@@ -57,16 +119,18 @@ jobs:
         shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@v4
       with:
         languages: go
         build-mode: manual
       env:
         CODEQL_EXTRACTOR_GO_BUILD_TRACING: on
-    - shell: bash
+
+    - name: Build with CodeQL
       run: |
         make build-all
+
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@v4
       with:
         category: "/language:go"

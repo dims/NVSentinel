@@ -178,32 +178,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
       - name: Download all coverage artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: "*-results"
           path: coverage-artifacts
-          merge-multiple: true
+          merge-multiple: false
 
       - name: Consolidate coverage files
         run: |
+          set -e
           echo "Consolidating coverage files from all components..."
           mkdir -p consolidated-coverage
 
-          # Find all coverage.txt files and merge them
+          # Initialize consolidated coverage with mode line
+          echo "mode: set" > consolidated-coverage/coverage.txt
+
+          # Find all coverage.txt files and merge them properly
           find coverage-artifacts -name "coverage.txt" -type f | while read -r file; do
             echo "Processing: $file"
-            # Extract the mode line (first line) if it's the first file
-            if [ ! -f consolidated-coverage/coverage.txt ]; then
-              head -n 1 "$file" > consolidated-coverage/coverage.txt
+
+            # Validate file exists and is not empty
+            if [[ ! -f "$file" || ! -s "$file" ]]; then
+              echo "Warning: Skipping empty or missing file: $file"
+              continue
             fi
-            # Append coverage data (skip mode line)
-            tail -n +2 "$file" >> consolidated-coverage/coverage.txt
+
+            # Validate coverage file format
+            if ! head -n 1 "$file" | grep -q "^mode:"; then
+              echo "Warning: Skipping file with invalid format (no mode line): $file"
+              continue
+            fi
+
+            # Extract coverage data (skip mode line) and validate each line
+            tail -n +2 "$file" | while IFS= read -r line; do
+              # Skip empty lines
+              [[ -z "$line" ]] && continue
+
+              # Validate coverage line format: file.go:start.col,end.col numStmts count
+              if [[ "$line" =~ ^[^:]+:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+$ ]]; then
+                echo "$line" >> consolidated-coverage/coverage.txt
+              else
+                echo "Warning: Skipping malformed coverage line: $line"
+              fi
+            done
           done
 
-          echo "Consolidated coverage file created:"
-          ls -la consolidated-coverage/
-          head -n 10 consolidated-coverage/coverage.txt
+          echo "✅ Coverage consolidation completed successfully"
 
       - name: Upload consolidated coverage
         uses: actions/upload-artifact@v4
@@ -212,14 +238,128 @@ jobs:
           path: consolidated-coverage/coverage.txt
           retention-days: 30
 
-      - name: Generate Go Coverage Report
-        uses: fgrosse/go-coverage-report@8c1d1a09864211d258937b1b1a5b849f7e4f2682 # v1.2.0
+      - name: Extract PR number from branch name
+        id: pr-number
+        run: |
+          if [[ "${{ github.ref }}" =~ pull-request/([0-9]+) ]]; then
+            echo "pr_number=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          else
+            echo "pr_number=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install go-coverage-report CLI tool
+        run: go install github.com/fgrosse/go-coverage-report/cmd/go-coverage-report@v1.2.0
+
+      - name: Get changed files
+        uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11
+        id: changed-files
         with:
-          coverage-artifact-name: "consolidated-code-coverage"
-          coverage-file-name: "coverage.txt"
-          root-package: "github.com/NVIDIA/nvsentinel"
-          skip-comment: false
-        continue-on-error: true  # Don't fail if baseline coverage doesn't exist yet
+          write_output_files: true
+          json: true
+          files: "**.go"
+          files_ignore: "vendor/**"
+          output_dir: .github/outputs
+
+      - name: Generate Coverage Report with Fixed PR Number
+        run: |
+          set -e  # Exit on error
+
+          # Current coverage is already uploaded in this workflow
+          echo "Downloading current coverage..."
+          if ! gh run download "${{ github.run_id }}" --name=consolidated-code-coverage --dir=/tmp/current-coverage; then
+            echo "❌ Failed to download current coverage artifacts"
+            exit 1
+          fi
+
+          if [[ ! -f /tmp/current-coverage/coverage.txt ]]; then
+            echo "❌ Current coverage file not found"
+            exit 1
+          fi
+
+          mv /tmp/current-coverage/coverage.txt .github/outputs/new-coverage.txt
+
+          # Download baseline coverage from main (failure here is acceptable)
+          echo "Downloading baseline coverage..."
+          LAST_SUCCESSFUL_RUN=$(gh run list --status=success --branch=main --workflow=lint-test.yml --event=push --json=databaseId --limit=1 -q '.[] | .databaseId')
+
+          if [[ -n "$LAST_SUCCESSFUL_RUN" ]]; then
+            echo "Found baseline run: $LAST_SUCCESSFUL_RUN"
+            if gh run download "$LAST_SUCCESSFUL_RUN" --name=consolidated-code-coverage --dir=/tmp/baseline-coverage 2>/dev/null; then
+              if [[ -f /tmp/baseline-coverage/coverage.txt ]]; then
+                echo "✅ Baseline coverage found"
+                mv /tmp/baseline-coverage/coverage.txt .github/outputs/old-coverage.txt
+              else
+                echo "⚠️  Baseline coverage file not found in artifact"
+                touch .github/outputs/old-coverage.txt  # Create empty file
+              fi
+            else
+              echo "⚠️  Failed to download baseline coverage (creating empty baseline)"
+              touch .github/outputs/old-coverage.txt  # Create empty file
+            fi
+          else
+            echo "⚠️  No successful baseline run found (creating empty baseline)"
+            touch .github/outputs/old-coverage.txt  # Create empty file
+          fi
+
+          # Generate the report using fgrosse's CLI tool (same format!)
+          echo "Generating coverage report..."
+          if ! go-coverage-report -root=github.com/NVIDIA/nvsentinel \
+            .github/outputs/old-coverage.txt \
+            .github/outputs/new-coverage.txt \
+            .github/outputs/all_modified_files.json > coverage-report.md 2> coverage-report.err; then
+            echo "❌ Failed to generate coverage report"
+            exit 1
+          fi
+
+          # Check if report is empty and why
+          if [[ ! -f coverage-report.md || ! -s coverage-report.md ]]; then
+            if grep -q "no changed files" coverage-report.err 2>/dev/null; then
+              echo "ℹ️  No Go files changed - skipping coverage report"
+              echo "## 📊 Coverage Report" > coverage-report.md
+              echo "No Go files were modified in this PR, so no coverage analysis is needed." >> coverage-report.md
+            else
+              echo "❌ Coverage report is empty or missing for unknown reason"
+              echo "Error output from go-coverage-report:"
+              cat coverage-report.err || echo "No error output"
+              exit 1
+            fi
+          fi
+
+          echo "✅ Coverage report generated successfully"
+
+          # Post comment using our correct PR number
+          if [[ -n "${{ steps.pr-number.outputs.pr_number }}" ]]; then
+            echo "Posting coverage comment to PR #${{ steps.pr-number.outputs.pr_number }}..."
+
+            # Check for existing coverage comment
+            EXISTING_COMMENT=$(gh api "repos/${{ github.repository }}/issues/${{ steps.pr-number.outputs.pr_number }}/comments" \
+              --jq '.[] | select(.user.login=="github-actions[bot]" and (.body | test("Coverage Report|Coverage Δ"))) | .id' \
+              | head -1 2>/dev/null || echo "")
+
+            if [[ -n "$EXISTING_COMMENT" ]]; then
+              echo "Updating existing comment $EXISTING_COMMENT..."
+              if ! gh api "repos/${{ github.repository }}/issues/${{ steps.pr-number.outputs.pr_number }}/comments/$EXISTING_COMMENT" \
+                --method PATCH --input coverage-report.md; then
+                echo "⚠️  Failed to update existing comment (likely permissions), creating new comment instead..."
+                if ! gh pr comment "${{ steps.pr-number.outputs.pr_number }}" --body-file=coverage-report.md; then
+                  echo "❌ Failed to create new coverage comment"
+                  exit 1
+                fi
+              fi
+            else
+              echo "Creating new comment..."
+              if ! gh pr comment "${{ steps.pr-number.outputs.pr_number }}" --body-file=coverage-report.md; then
+                echo "❌ Failed to create coverage comment"
+                exit 1
+              fi
+            fi
+
+            echo "✅ Coverage comment posted successfully"
+          else
+            echo "⚠️  No PR number found, skipping comment"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   consolidated-coverage-baseline:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -234,27 +374,48 @@ jobs:
         with:
           pattern: "*-results"
           path: coverage-artifacts
-          merge-multiple: true
+          merge-multiple: false
 
       - name: Consolidate coverage files
         run: |
+          set -e
           echo "Consolidating coverage files from all components for baseline..."
           mkdir -p consolidated-coverage
 
-          # Find all coverage.txt files and merge them
+          # Initialize consolidated coverage with mode line
+          echo "mode: set" > consolidated-coverage/coverage.txt
+
+          # Find all coverage.txt files and merge them properly
           find coverage-artifacts -name "coverage.txt" -type f | while read -r file; do
             echo "Processing: $file"
-            # Extract the mode line (first line) if it's the first file
-            if [ ! -f consolidated-coverage/coverage.txt ]; then
-              head -n 1 "$file" > consolidated-coverage/coverage.txt
+
+            # Validate file exists and is not empty
+            if [[ ! -f "$file" || ! -s "$file" ]]; then
+              echo "Warning: Skipping empty or missing file: $file"
+              continue
             fi
-            # Append coverage data (skip mode line)
-            tail -n +2 "$file" >> consolidated-coverage/coverage.txt
+
+            # Validate coverage file format
+            if ! head -n 1 "$file" | grep -q "^mode:"; then
+              echo "Warning: Skipping file with invalid format (no mode line): $file"
+              continue
+            fi
+
+            # Extract coverage data (skip mode line) and validate each line
+            tail -n +2 "$file" | while IFS= read -r line; do
+              # Skip empty lines
+              [[ -z "$line" ]] && continue
+
+              # Validate coverage line format: file.go:start.col,end.col numStmts count
+              if [[ "$line" =~ ^[^:]+:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+$ ]]; then
+                echo "$line" >> consolidated-coverage/coverage.txt
+              else
+                echo "Warning: Skipping malformed coverage line: $line"
+              fi
+            done
           done
 
-          echo "Baseline coverage file created:"
-          ls -la consolidated-coverage/
-          echo "Total coverage lines: $(wc -l < consolidated-coverage/coverage.txt)"
+          echo "✅ Coverage consolidation completed successfully"
 
       - name: Upload consolidated coverage baseline
         uses: actions/upload-artifact@v4
