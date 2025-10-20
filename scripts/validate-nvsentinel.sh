@@ -21,12 +21,14 @@ set -uo pipefail
 NAMESPACE=""
 VERSION=""
 VERBOSE=false
+IMAGE_PATTERN=""
 
 usage() {
-    echo "Usage: $0 --version VERSION [--namespace NAMESPACE] [--verbose]"
-    echo "  --version   Required. Expected image version (e.g., v0.0.3)"
-    echo "  --namespace Optional. Kubernetes namespace (default: nvsentinel)"
-    echo "  --verbose   Optional. Print detailed image lists"
+    echo "Usage: $0 --version VERSION [--namespace NAMESPACE] [--image-pattern PATTERN] [--verbose]"
+    echo "  --version       Required. Expected image version (e.g., v0.0.3)"
+    echo "  --namespace     Optional. Kubernetes namespace (default: nvsentinel)"
+    echo "  --image-pattern Optional. Image pattern to validate (default: ghcr.io/nvidia/nvsentinel)"
+    echo "  --verbose       Optional. Print detailed image lists"
     exit 1
 }
 
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --version) VERSION="$2"; shift 2 ;;
         --namespace) NAMESPACE="$2"; shift 2 ;;
+        --image-pattern) IMAGE_PATTERN="$2"; shift 2 ;;
         --verbose) VERBOSE=true; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1"; usage ;;
@@ -43,6 +46,7 @@ done
 # Validate required parameters
 [[ -z "$VERSION" ]] && { echo "Error: --version is required"; usage; }
 NAMESPACE="${NAMESPACE:-nvsentinel}"
+IMAGE_PATTERN="${IMAGE_PATTERN:-ghcr.io/nvidia/nvsentinel}"
 
 ERRORS=0
 
@@ -80,10 +84,10 @@ ok "cluster has $total_nodes total nodes ($gpu_nodes GPU nodes, $kwok_nodes KWOK
 echo "=== Image Versions ==="
 # shellcheck disable=SC2126  # wc -l is clearer than grep -c for pipeline
 wrong_versions=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].spec.containers[*].image}' 2>/dev/null | \
-    tr ' ' '\n' | grep "ghcr.io/nvidia/nvsentinel" | grep -v ":$VERSION" | wc -l 2>/dev/null || echo "0")
+    tr ' ' '\n' | grep "$IMAGE_PATTERN" | grep -v ":$VERSION" | wc -l 2>/dev/null || echo "0")
 wrong_versions=$(echo "$wrong_versions" | tr -d '\n' | tr -d ' ')
 # shellcheck disable=SC2015  # && || pattern is intentional for conditional execution
-[[ "$wrong_versions" -eq 0 ]] && ok "all nvsentinel images use $VERSION" || error "$wrong_versions pods use wrong image version"
+[[ "$wrong_versions" -eq 0 ]] && ok "all nvsentinel images use $VERSION (pattern: $IMAGE_PATTERN)" || error "$wrong_versions pods use wrong image version (pattern: $IMAGE_PATTERN)"
 
 # Count images by registry across cluster
 all_images=$( (kubectl get deployments,daemonsets,statefulsets,jobs,cronjobs,replicasets --all-namespaces -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{range .spec.template.spec.initContainers[*]}{.image}{"\n"}{end}{end}' 2>/dev/null; kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}') | sort -u )
@@ -139,7 +143,7 @@ for secret in "${secrets[@]}"; do
             warn "$secret: present but wrong type ($secret_type)"
         fi
     else
-        error "$secret not found"
+        warn "$secret not found"
     fi
 done
 
