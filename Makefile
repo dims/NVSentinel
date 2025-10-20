@@ -375,9 +375,9 @@ helm-lint:
 		if [[ -f "$$chart_dir/Chart.yaml" ]]; then \
 			chart_name=$$(basename "$$chart_dir"); \
 			echo "Validating chart: $$chart_name"; \
-			helm lint "$$chart_dir" || exit 1; \
+			helm lint "$$chart_dir" -f distros/kubernetes/nvsentinel/values.yaml || exit 1; \
 			echo "Testing template rendering for: $$chart_name"; \
-			helm template "$$chart_name" "$$chart_dir" >/dev/null || exit 1; \
+			helm template "$$chart_name" "$$chart_dir" -f distros/kubernetes/nvsentinel/values.yaml >/dev/null || exit 1; \
 			echo ""; \
 		fi; \
 	done
