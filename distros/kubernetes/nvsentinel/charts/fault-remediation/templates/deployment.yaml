@@ -36,6 +36,8 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "nvsentinel.serviceAccountName" . }}
+      securityContext:
+        runAsUser: 0
       containers:
         - name: fault-remediation
           image: "{{ .Values.global.faultRemediationModule.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
@@ -49,9 +51,15 @@ spec:
             - name: metrics
               containerPort: {{ .Values.global.metricsPort }}
           volumeMounts:
+          {{- if (include "nvsentinel.isPostgreSQL" . | eq "true") }}
+          - name: postgresql-client-cert
+            mountPath: {{ .Values.clientCertMountPath }}
+            readOnly: true
+          {{- else }}
           - name: mongo-app-client-cert
             mountPath: {{ .Values.clientCertMountPath }}
             readOnly: true
+          {{- end }}
           - name: templates
             mountPath: {{ .Values.maintenanceResource.template.mountPath }}
           env:
@@ -61,8 +69,13 @@ spec:
             value: {{ .Values.maintenanceResource.version }}
           - name: MAINTENANCE_API_GROUP
             value: {{ .Values.maintenanceResource.apiGroup }}
+          {{- if (include "nvsentinel.isPostgreSQL" . | eq "true") }}
+          - name: POSTGRESQL_CLIENT_CERT_MOUNT_PATH
+            value: {{ .Values.clientCertMountPath }}
+          {{- else }}
           - name: MONGODB_CLIENT_CERT_MOUNT_PATH
             value: {{ .Values.clientCertMountPath }}
+          {{- end }}
           - name: TEMPLATE_MOUNT_PATH
             value: {{ .Values.maintenanceResource.template.mountPath }}
           - name: TEMPLATE_FILE_NAME
@@ -75,13 +88,21 @@ spec:
             value: "{{ .Values.logCollector.enableGcpSosCollection }}"
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ include "nvsentinel.datastoreConfigName" . }}
                 optional: true
       volumes:
+      {{- if (include "nvsentinel.isPostgreSQL" . | eq "true") }}
+      - name: postgresql-client-cert
+        secret:
+          secretName: postgresql-client-cert
+          defaultMode: 0640  # Fix PostgreSQL private key permissions (owner rw, group r)
+          optional: true
+      {{- else }}
       - name: mongo-app-client-cert
         secret:
           secretName: mongo-app-client-cert-secret
           optional: true
+      {{- end }}
       - name: templates
         configMap:
           name: fault-remediation-templates

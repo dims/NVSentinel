@@ -48,19 +48,33 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   e2e-test:
-    # Run E2E tests on both AMD64 and ARM64 architectures in parallel
+    # Run E2E tests on both AMD64 and ARM64 architectures with both MongoDB and PostgreSQL
     strategy:
-      fail-fast: false  # Allow both architectures to complete even if one fails
+      fail-fast: false  # Allow all combinations to complete even if some fail
       matrix:
         include:
           - arch: amd64
             runner: ${{ vars.RUNNER_ARCH_LARGE_AMD64 || 'linux-amd64-cpu32' }}
             arch_name: "AMD64"
+            datastore: "mongodb"
+            datastore_name: "MongoDB"
           - arch: arm64
             runner: ${{ vars.RUNNER_ARCH_LARGE_ARM64 || 'linux-arm64-cpu32' }}
             arch_name: "ARM64"
+            datastore: "mongodb"
+            datastore_name: "MongoDB"
+          - arch: amd64
+            runner: ${{ vars.RUNNER_ARCH_LARGE_AMD64 || 'linux-amd64-cpu32' }}
+            arch_name: "AMD64"
+            datastore: "postgresql"
+            datastore_name: "PostgreSQL"
+          - arch: arm64
+            runner: ${{ vars.RUNNER_ARCH_LARGE_ARM64 || 'linux-arm64-cpu32' }}
+            arch_name: "ARM64"
+            datastore: "postgresql"
+            datastore_name: "PostgreSQL"
 
-    name: "E2E Tests (${{ matrix.arch_name }})"
+    name: "E2E Tests (${{ matrix.arch_name }} + ${{ matrix.datastore_name }})"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     needs: prepare-environment
@@ -209,13 +223,13 @@ jobs:
           NVCR_CONTAINER_REPO: ${{ needs.prepare-environment.outputs.nvcr_container_repo }}
           NGC_ORG: ${{ needs.prepare-environment.outputs.container_org }}
           CTLPTL_YAML: ctlptl-config.yaml
-          # Make cluster names unique per architecture to avoid conflicts in parallel runs
-          CLUSTER_NAME_SUFFIX: "-${{ matrix.arch }}"
+          # Make cluster names unique per architecture and datastore to avoid conflicts in parallel runs
+          CLUSTER_NAME_SUFFIX: "-${{ matrix.arch }}-${{ matrix.datastore }}"
         run: |
           make cluster-create
 
       - name: Override MongoDB image for ARM64
-        if: matrix.arch == 'arm64'
+        if: matrix.arch == 'arm64' && matrix.datastore == 'mongodb'
         run: |
           sed -i 's/repository: "bitnamilegacy\/mongodb"/repository: "dlavrenuek\/bitnami-mongodb-arm"/' distros/kubernetes/nvsentinel/values-tilt.yaml
           sed -i 's/tag: "8.0.3-debian-12-r1"/tag: "8.0.4"/' distros/kubernetes/nvsentinel/values-tilt.yaml
@@ -227,14 +241,16 @@ jobs:
           NGC_ORG: ${{ needs.prepare-environment.outputs.container_org }}
           CTLPTL_YAML: ctlptl-config.yaml
           # Use same cluster name suffix for consistency
-          CLUSTER_NAME_SUFFIX: "-${{ matrix.arch }}"
+          CLUSTER_NAME_SUFFIX: "-${{ matrix.arch }}-${{ matrix.datastore }}"
+          # Set datastore-specific Tiltfile
+          TILTFILE: ${{ matrix.datastore == 'postgresql' && 'Tiltfile.postgresql' || 'Tiltfile' }}
         run: |
           make e2e-test-ci
 
       - name: Upload test results
         uses: ./.github/actions/upload-test-artifacts
         with:
-          component-name: e2e-test-${{ matrix.arch }}
+          component-name: e2e-test-${{ matrix.arch }}-${{ matrix.datastore }}
           file-paths: |
             tests/results/
             tests/*.log

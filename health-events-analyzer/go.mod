@@ -16,9 +16,9 @@ require (
 )
 
 require (
+	github.com/kr/text v0.2.0 // indirect
+	github.com/lib/pq v1.10.9 // indirect
 	go.mongodb.org/mongo-driver v1.17.4 // indirect
-	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
@@ -56,3 +56,5 @@ require (
 replace github.com/nvidia/nvsentinel/store-client-sdk => ../store-client-sdk
 
 replace github.com/nvidia/nvsentinel/data-models => ../data-models
+
+replace github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor => ../health-monitors/csp-health-monitor

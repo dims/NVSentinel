@@ -62,7 +62,7 @@ spec:
               value: {{ .Values.clientCertMountPath }}
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ include "nvsentinel.datastoreConfigName" . }}
                 optional: true
       volumes:
       - name: config-volume

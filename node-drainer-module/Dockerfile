@@ -28,7 +28,7 @@ WORKDIR /go/src
 COPY node-drainer-module/go.mod node-drainer-module/go.sum ./node-drainer-module/
 COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
 COPY statemanager/go.mod statemanager/go.sum ./statemanager/
-COPY data-models/go.mod data-models/go.sum data-models/
+COPY data-models/go.mod data-models/go.sum ./data-models/
 
 # Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/

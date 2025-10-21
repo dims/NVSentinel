@@ -28,11 +28,15 @@ WORKDIR /go/src
 # Copy go modules and dependencies (based on go.mod replace directives)
 COPY health-events-analyzer/go.mod health-events-analyzer/go.sum ./health-events-analyzer/
 COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
-COPY data-models/go.mod data-models/go.sum data-models/
+COPY data-models/go.mod data-models/go.sum ./data-models/
+COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
+COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
 
 # Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/
 COPY data-models/ ./data-models/
+COPY platform-connectors/ ./platform-connectors/
+COPY health-monitors/csp-health-monitor/ ./health-monitors/csp-health-monitor/
 
 # Copy main module source
 COPY health-events-analyzer/ ./health-events-analyzer/

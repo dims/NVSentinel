@@ -28,7 +28,7 @@ WORKDIR /go/src
 COPY fault-quarantine-module/go.mod fault-quarantine-module/go.sum ./fault-quarantine-module/
 COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
 COPY statemanager/go.mod statemanager/go.sum ./statemanager/
-COPY data-models/go.mod data-models/go.sum data-models/
+COPY data-models/go.mod data-models/go.sum ./data-models/
 
 # Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/

@@ -20,6 +20,7 @@ import (
 
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers/mongodb"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers/postgresql"
 )
 
 // Config holds configuration for creating change stream watchers
@@ -51,6 +52,14 @@ func CreateChangeStreamWatcher(
 		}
 
 		return datastore.NewChangeStreamWatcher(ctx, mongoConfig)
+
+	case *postgresql.PostgreSQLDataStore:
+		// Create PostgreSQL change stream watcher
+		return postgresql.NewPostgreSQLChangeStreamWatcher(
+			datastore.GetDB(), // Access the underlying database connection
+			config.ClientName,
+			config.TableName,
+		), nil
 
 	default:
 		return nil, fmt.Errorf("change stream watching not supported for datastore type: %T", datastore)

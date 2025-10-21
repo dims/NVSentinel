@@ -6,6 +6,7 @@ CTLPTL_CONFIG_FILE ?= ../ctlptl-config.yaml
 CLUSTER_NAME ?= kind-nvsentinel
 REGISTRY_NAME ?= ctlptl-registry
 REGISTRY_PORT ?= 5001
+TILTFILE ?= ../Tiltfile
 
 # Tilt development targets
 .PHONY: tilt-up
@@ -15,13 +16,13 @@ tilt-up:
 		echo "Error: tilt is not installed. Please install from https://tilt.dev/"; \
 		exit 1; \
 	fi
-	cd .. && tilt up
+	cd .. && tilt up -f $(TILTFILE)
 
 .PHONY: tilt-down
 tilt-down:
 	@echo "Stopping Tilt development environment..."
 	@if command -v tilt >/dev/null 2>&1; then \
-		cd .. && tilt down; \
+		cd .. && tilt down -f $(TILTFILE); \
 	else \
 		echo "Warning: tilt is not installed"; \
 	fi
@@ -33,7 +34,7 @@ tilt-ci:
 		echo "Error: tilt is not installed. Please install from https://tilt.dev/"; \
 		exit 1; \
 	fi
-	cd .. && tilt ci
+	cd .. && tilt ci -f $(TILTFILE)
 
 # ctlptl cluster configuration
 .PHONY: cluster-create
@@ -59,7 +60,23 @@ cluster-create:
 		echo "Error: ctlptl config file $(CTLPTL_CONFIG_FILE) not found"; \
 		exit 1; \
 	fi
-	ctlptl apply -f $(CTLPTL_CONFIG_FILE)
+	@# Generate dynamic ctlptl config with cluster name suffix and unique registry
+	@CLUSTER_NAME_WITH_SUFFIX="$(CLUSTER_NAME)$(CLUSTER_NAME_SUFFIX)"; \
+	REGISTRY_NAME_WITH_SUFFIX="$(REGISTRY_NAME)$(CLUSTER_NAME_SUFFIX)"; \
+	if [ -n "$(CLUSTER_NAME_SUFFIX)" ]; then \
+		REGISTRY_PORT_SUFFIX=$$(echo "$(CLUSTER_NAME_SUFFIX)" | md5sum | head -c4); \
+		REGISTRY_PORT_WITH_SUFFIX=$$((5001 + 0x$$REGISTRY_PORT_SUFFIX % 1000)); \
+	else \
+		REGISTRY_PORT_WITH_SUFFIX=$(REGISTRY_PORT); \
+	fi; \
+	sed -e "s/name: kind-nvsentinel/name: $$CLUSTER_NAME_WITH_SUFFIX/" \
+	    -e "s/name: ctlptl-registry/name: $$REGISTRY_NAME_WITH_SUFFIX/" \
+	    -e "s/registry: ctlptl-registry/registry: $$REGISTRY_NAME_WITH_SUFFIX/" \
+	    -e "s/port: 5001/port: $$REGISTRY_PORT_WITH_SUFFIX/" \
+	    $(CTLPTL_CONFIG_FILE) > /tmp/ctlptl-config-$$$$.yaml; \
+	echo "Creating cluster $$CLUSTER_NAME_WITH_SUFFIX with registry $$REGISTRY_NAME_WITH_SUFFIX on port $$REGISTRY_PORT_WITH_SUFFIX"; \
+	ctlptl apply -f /tmp/ctlptl-config-$$$$.yaml; \
+	rm -f /tmp/ctlptl-config-$$$$.yaml
 	@echo "Cluster created successfully!"
 	@echo "Registry available at localhost:$(REGISTRY_PORT)"
 
@@ -70,7 +87,23 @@ cluster-delete:
 		echo "Error: ctlptl config file $(CTLPTL_CONFIG_FILE) not found"; \
 		exit 1; \
 	fi
-	ctlptl delete -f $(CTLPTL_CONFIG_FILE) || echo "Resources from $(CTLPTL_CONFIG_FILE) not found"
+	@# Generate dynamic ctlptl config with cluster name suffix and unique registry for deletion
+	@CLUSTER_NAME_WITH_SUFFIX="$(CLUSTER_NAME)$(CLUSTER_NAME_SUFFIX)"; \
+	REGISTRY_NAME_WITH_SUFFIX="$(REGISTRY_NAME)$(CLUSTER_NAME_SUFFIX)"; \
+	if [ -n "$(CLUSTER_NAME_SUFFIX)" ]; then \
+		REGISTRY_PORT_SUFFIX=$$(echo "$(CLUSTER_NAME_SUFFIX)" | md5sum | head -c4); \
+		REGISTRY_PORT_WITH_SUFFIX=$$((5001 + 0x$$REGISTRY_PORT_SUFFIX % 1000)); \
+	else \
+		REGISTRY_PORT_WITH_SUFFIX=$(REGISTRY_PORT); \
+	fi; \
+	sed -e "s/name: kind-nvsentinel/name: $$CLUSTER_NAME_WITH_SUFFIX/" \
+	    -e "s/name: ctlptl-registry/name: $$REGISTRY_NAME_WITH_SUFFIX/" \
+	    -e "s/registry: ctlptl-registry/registry: $$REGISTRY_NAME_WITH_SUFFIX/" \
+	    -e "s/port: 5001/port: $$REGISTRY_PORT_WITH_SUFFIX/" \
+	    $(CTLPTL_CONFIG_FILE) > /tmp/ctlptl-config-$$$$.yaml; \
+	echo "Deleting cluster $$CLUSTER_NAME_WITH_SUFFIX with registry $$REGISTRY_NAME_WITH_SUFFIX"; \
+	ctlptl delete -f /tmp/ctlptl-config-$$$$.yaml || echo "Resources with cluster name $$CLUSTER_NAME_WITH_SUFFIX not found"; \
+	rm -f /tmp/ctlptl-config-$$$$.yaml
 
 .PHONY: cluster-status
 cluster-status:
@@ -122,6 +155,7 @@ help:
 	@echo "  CLUSTER_NAME           - Cluster name (default: nvsentinel)"
 	@echo "  REGISTRY_NAME          - Registry name (default: ctlptl-registry)"
 	@echo "  REGISTRY_PORT          - Registry port (default: 5001)"
+	@echo "  TILTFILE               - Tiltfile to use (default: ../Tiltfile)"
 	@echo ""
 	@echo "Notes:"
 	@echo "  - ctlptl cluster requires Docker, ctlptl, and Kind to be installed"

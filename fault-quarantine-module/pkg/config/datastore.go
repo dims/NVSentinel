@@ -45,7 +45,6 @@ func LoadDatastoreConfig() (*datastore.DataStoreConfig, error) {
 	config.Connection.Host = getEnvWithDefault("DATASTORE_HOST", "localhost")
 	config.Connection.Database = getEnvWithDefault("DATASTORE_DATABASE", "nvsentinel")
 	config.Connection.Username = os.Getenv("DATASTORE_USERNAME")
-	config.Connection.Password = os.Getenv("DATASTORE_PASSWORD")
 	config.Connection.SSLMode = os.Getenv("DATASTORE_SSLMODE")
 	config.Connection.SSLCert = os.Getenv("DATASTORE_SSLCERT")
 	config.Connection.SSLKey = os.Getenv("DATASTORE_SSLKEY")

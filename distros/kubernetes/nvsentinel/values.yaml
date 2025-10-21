@@ -167,6 +167,10 @@ platformConnector:
     enabled: false
     clientCertMountPath: "/etc/ssl/mongo-client"
 
+  postgresqlStore:
+    enabled: false
+    clientCertMountPath: "/etc/ssl/client-certs"
+
   podSecurityContext: {}
 
   updateStrategy: RollingUpdate

@@ -36,6 +36,8 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "nvsentinel.serviceAccountName" . }}
+      securityContext:
+        runAsUser: 0
       containers:
         - name: node-drainer
           image: "{{ .Values.global.nodeDrainerModule.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
@@ -53,15 +55,26 @@ spec:
           - name: config-volume
             mountPath: /etc/config/config.toml
             subPath: config.toml
+          {{- if (include "nvsentinel.isPostgreSQL" . | eq "true") }}
+          - name: postgresql-client-cert
+            mountPath: {{ .Values.clientCertMountPath }}
+            readOnly: true
+          {{- else }}
           - name: mongo-app-client-cert
             mountPath: {{ .Values.clientCertMountPath }}
             readOnly: true
+          {{- end }}
           env:
+          {{- if (include "nvsentinel.isPostgreSQL" . | eq "true") }}
+          - name: POSTGRESQL_CLIENT_CERT_MOUNT_PATH
+            value: {{ .Values.clientCertMountPath }}
+          {{- else }}
           - name: MONGODB_CLIENT_CERT_MOUNT_PATH
             value: {{ .Values.clientCertMountPath }}
+          {{- end }}
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ include "nvsentinel.datastoreConfigName" . }}
                 optional: true
       volumes:
       - name: config-volume
@@ -70,10 +83,18 @@ spec:
           items:
           - key: config.toml
             path: config.toml
+      {{- if (include "nvsentinel.isPostgreSQL" . | eq "true") }}
+      - name: postgresql-client-cert
+        secret:
+          secretName: postgresql-client-cert
+          defaultMode: 0640  # Fix PostgreSQL private key permissions (owner rw, group r)
+          optional: true
+      {{- else }}
       - name: mongo-app-client-cert
         secret:
           secretName: mongo-app-client-cert-secret
           optional: true
+      {{- end }}
       restartPolicy: Always
       {{- with (.Values.global.systemNodeSelector | default .Values.nodeSelector) }}
       nodeSelector:

@@ -404,7 +404,21 @@ protos-clean:
 .PHONY: license-headers-lint
 license-headers-lint:
 	@echo "Checking license headers..."
-	addlicense -f license-header.txt -check -ignore **/*lock.hcl -ignore **/*pb2.py -ignore **/*pb2_grpc.py -ignore **/*.csv -ignore **/.venv/** -ignore **/.idea/** -ignore distros/kubernetes/nvsentinel/charts/mongodb-store/charts/mongodb/Chart.yaml -ignore distros/kubernetes/nvsentinel/charts/mongodb-store/charts/mongodb/charts/common/Chart.yaml -ignore health-monitors/gpu-health-monitor/pyproject.toml -ignore nvsentinel-log-collector/pyproject.toml .
+	addlicense -f license-header.txt -check \
+		-ignore "**/.venv/**" \
+		-ignore "**/.idea/**" \
+		-ignore "**/node_modules/**" \
+		-ignore "**/*lock.hcl" \
+		-ignore "**/*pb2.py" \
+		-ignore "**/*pb2_grpc.py" \
+		-ignore "**/*pb2.pyi" \
+		-ignore "**/*.csv" \
+		-ignore "**/site-packages/**" \
+		-ignore "health-monitors/gpu-health-monitor/pyproject.toml" \
+		-ignore "nvsentinel-log-collector/pyproject.toml" \
+		-ignore "**/coverage.xml" \
+		-ignore "**/report.xml" \
+		.
 
 # Check go.mod files for proper replace directives
 .PHONY: gomod-lint

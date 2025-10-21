@@ -72,6 +72,8 @@ data:
   DATASTORE_SSLROOTCERT: {{ .Values.global.datastore.connection.sslrootcert | quote }}
   {{- end }}
 
+  # Provider-specific configuration
+  {{- if eq .Values.global.datastore.provider "mongodb" }}
   # MongoDB specific
   MONGODB_URI: "mongodb://{{ .Values.global.datastore.connection.host }}:{{ .Values.global.datastore.connection.port | default 27017 }}"
   MONGODB_DATABASE_NAME: {{ .Values.global.datastore.connection.database | quote }}
@@ -80,5 +82,17 @@ data:
   MONGODB_COLLECTION_NAME: {{ .Values.global.datastore.connection.collection | quote }}
   {{- else }}
   MONGODB_COLLECTION_NAME: "health_events"
+  {{- end }}
+  {{- else if eq .Values.global.datastore.provider "postgresql" }}
+  # PostgreSQL specific
+  POSTGRES_HOST: {{ .Values.global.datastore.connection.host | quote }}
+  POSTGRES_PORT: {{ .Values.global.datastore.connection.port | default 5432 | quote }}
+  POSTGRES_DATABASE: {{ .Values.global.datastore.connection.database | quote }}
+  {{- if .Values.global.datastore.connection.username }}
+  POSTGRES_USER: {{ .Values.global.datastore.connection.username | quote }}
+  {{- end }}
+  {{- if .Values.global.datastore.connection.sslmode }}
+  POSTGRES_SSLMODE: {{ .Values.global.datastore.connection.sslmode | quote }}
+  {{- end }}
   {{- end }}
 {{- end }}

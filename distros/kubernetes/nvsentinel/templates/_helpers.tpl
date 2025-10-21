@@ -60,3 +60,36 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Return the appropriate datastore config name based on provider
+*/}}
+{{- define "nvsentinel.datastoreConfigName" -}}
+{{- if eq .Values.global.datastore.provider "postgresql" -}}
+nvsentinel-datastore-config
+{{- else -}}
+mongodb-config
+{{- end -}}
+{{- end }}
+
+{{/*
+Check if datastore provider is PostgreSQL
+*/}}
+{{- define "nvsentinel.isPostgreSQL" -}}
+{{- if eq .Values.global.datastore.provider "postgresql" -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end }}
+
+{{/*
+Check if datastore provider is MongoDB
+*/}}
+{{- define "nvsentinel.isMongoDB" -}}
+{{- if eq .Values.global.datastore.provider "mongodb" -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end }}

@@ -42,7 +42,6 @@ func LoadDatastoreConfig() (*datastore.DataStoreConfig, error) {
 			Port:        0, // Will be set based on provider below
 			Database:    getEnvWithDefault("DATASTORE_DATABASE", "nvsentinel"),
 			Username:    os.Getenv("DATASTORE_USERNAME"),
-			Password:    os.Getenv("DATASTORE_PASSWORD"),
 			SSLMode:     os.Getenv("DATASTORE_SSLMODE"),
 			SSLCert:     os.Getenv("DATASTORE_SSLCERT"),
 			SSLKey:      os.Getenv("DATASTORE_SSLKEY"),
@@ -53,6 +52,8 @@ func LoadDatastoreConfig() (*datastore.DataStoreConfig, error) {
 		switch config.Provider {
 		case datastore.ProviderMongoDB:
 			config.Connection.Port = getEnvIntWithDefault("DATASTORE_PORT", 27017)
+		case datastore.ProviderPostgreSQL:
+			config.Connection.Port = getEnvIntWithDefault("DATASTORE_PORT", 5432)
 		default:
 			if portStr := os.Getenv("DATASTORE_PORT"); portStr != "" {
 				if port, err := strconv.Atoi(portStr); err == nil {
@@ -89,7 +90,6 @@ func LoadDatastoreConfig() (*datastore.DataStoreConfig, error) {
 			Port:     getEnvIntWithDefault("DATASTORE_PORT", 27017),
 			Database: getEnvWithDefault("DATASTORE_DATABASE", "nvsentinel"),
 			Username: os.Getenv("DATASTORE_USERNAME"),
-			Password: os.Getenv("DATASTORE_PASSWORD"),
 		},
 	}
 

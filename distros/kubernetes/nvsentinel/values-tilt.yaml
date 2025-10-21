@@ -175,10 +175,6 @@ tolerations:
 mongodb-store:
   mongodb:
 
-    global:
-      imagePullSecrets:
-        - nvidia-ngcuser-pull-secret
-
     nodeSelector:
       node-role.kubernetes.io/control-plane: ""
 
@@ -203,23 +199,6 @@ mongodb-store:
 
     metrics:
       enabled: false
-      image:
-        registry: docker.io
-        repository: bitnamilegacy/mongodb-exporter
-        tag: 0.41.2-debian-12-r1
-
-#    # Reduce MongoDB log verbosity - using configuration for fine-grained control
-#    configuration: |-
-#      # Reduce overall log verbosity
-#      systemLog:
-#        quiet: true
-#        verbosity: 0
-#        # Reduce noisy component logs (network, replication)
-#        component:
-#          network:
-#            verbosity: 0
-#          replication:
-#            verbosity: 0
 
   # Enable syslog monitoring for both XID and SXID errors
   # Disabled in Tilt mode as it requires NVIDIA drivers

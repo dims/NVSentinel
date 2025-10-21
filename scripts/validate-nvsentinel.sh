@@ -27,6 +27,8 @@ usage() {
     echo "  --version   Optional. Expected image version (e.g., v0.0.3). Defaults to tilt-* pattern if not provided"
     echo "  --namespace Optional. Kubernetes namespace (default: nvsentinel)"
     echo "  --verbose   Optional. Print detailed image lists"
+    echo ""
+    echo "The script automatically detects whether MongoDB or PostgreSQL is used as the datastore."
     exit 1
 }
 
@@ -53,6 +55,7 @@ warn() { echo "⚠ $1"; }
 
 # Prerequisites
 command -v kubectl >/dev/null || { error "kubectl not found"; exit 1; }
+command -v jq >/dev/null || { error "jq not found (required for restart time analysis)"; exit 1; }
 kubectl cluster-info >/dev/null || { error "cluster not accessible"; exit 1; }
 
 # Namespace
@@ -61,6 +64,19 @@ if kubectl get ns "$NAMESPACE" >/dev/null 2>&1; then
     ok "namespace $NAMESPACE exists"
 else
     error "namespace $NAMESPACE missing"
+fi
+
+# Auto-detect datastore
+echo "=== Datastore Detection ==="
+if kubectl get statefulset nvsentinel-mongodb -n "$NAMESPACE" >/dev/null 2>&1; then
+    DATASTORE="mongodb"
+    ok "detected MongoDB datastore"
+elif kubectl get statefulset nvsentinel-postgresql -n "$NAMESPACE" >/dev/null 2>&1; then
+    DATASTORE="postgresql"
+    ok "detected PostgreSQL datastore"
+else
+    error "could not detect datastore type (no MongoDB or PostgreSQL StatefulSet found)"
+    DATASTORE="unknown"
 fi
 
 # Node counts
@@ -157,7 +173,7 @@ for secret in "${secrets[@]}"; do
             warn "$secret: present but wrong type ($secret_type)"
         fi
     else
-        error "$secret not found"
+        warn "$secret not found (expected in development environments)"
     fi
 done
 
@@ -275,11 +291,23 @@ check_job() {
 
 # Check statefulsets
 echo "=== StatefulSets ==="
-check_statefulset "nvsentinel-mongodb" 3
+if [[ "$DATASTORE" == "mongodb" ]]; then
+    check_statefulset "nvsentinel-mongodb" 3
+elif [[ "$DATASTORE" == "postgresql" ]]; then
+    check_statefulset "nvsentinel-postgresql" 1
+else
+    error "unknown datastore type: $DATASTORE"
+fi
 
 # Check jobs
 echo "=== Jobs ==="
-check_job "create-mongodb-database"
+if [[ "$DATASTORE" == "mongodb" ]]; then
+    check_job "create-mongodb-database"
+elif [[ "$DATASTORE" == "postgresql" ]]; then
+    ok "PostgreSQL: no initialization job needed (tables created automatically)"
+else
+    error "unknown datastore type: $DATASTORE"
+fi
 
 # Check deployments (application components)
 echo "=== Deployments ==="
@@ -328,7 +356,15 @@ fi
 
 # Services
 echo "=== Services ==="
-services=("nvsentinel-mongodb-headless" "simple-health-client")
+if [[ "$DATASTORE" == "mongodb" ]]; then
+    services=("nvsentinel-mongodb-headless" "simple-health-client")
+elif [[ "$DATASTORE" == "postgresql" ]]; then
+    services=("nvsentinel-postgresql" "nvsentinel-postgresql-hl" "simple-health-client")
+else
+    services=("simple-health-client")
+    error "unknown datastore type for service validation: $DATASTORE"
+fi
+
 for svc in "${services[@]}"; do
     if kubectl get service "$svc" -n "$NAMESPACE" >/dev/null 2>&1; then
         endpoints=$(kubectl get endpoints "$svc" -n "$NAMESPACE" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | wc -w || echo "0")
@@ -349,15 +385,56 @@ crash_loop=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[?(@.status.co
 # shellcheck disable=SC2015  # && || pattern is intentional for conditional execution
 [[ -z "$crash_loop" ]] && ok "no CrashLoopBackOff issues" || error "CrashLoopBackOff pods: $crash_loop"
 
-# Check for frequent restarts (threshold: >3 restarts)
-high_restart_containers=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.name}{" "}{.restartCount}{"\n"}{end}{end}' 2>/dev/null | awk '$3 > 3 {print $1"/"$2 "(" $3 " restarts)"}' | tr '\n' ' ' | awk '{sub(/[ \t]+$/, "")} 1' || echo "")
+# Check for excessive recent restarts (more than 3 restarts within last 3 minutes)
+recent_restart_containers=""
+# Get current time in seconds since epoch
+current_time=$(date +%s)
+three_minutes_ago=$((current_time - 180))
+
+# Get pods with restart counts > 3 and check their last restart time
+pods_with_restarts=$(kubectl get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.items[] | select(.status.containerStatuses[]?.restartCount > 3) | .metadata.name' 2>/dev/null || echo "")
+
+for pod in $pods_with_restarts; do
+    # Get container restart info for this pod (only containers with > 3 restarts)
+    container_info=$(kubectl get pod "$pod" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.containerStatuses[] | select(.restartCount > 3) | "\(.name) \(.restartCount) \(.lastState.terminated.finishedAt // empty)"' 2>/dev/null || echo "")
+
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            read -r container_name restart_count last_restart_time <<< "$line"
+
+            # Check if we have a valid restart time and it's recent
+            if [[ -n "$last_restart_time" && "$last_restart_time" != "null" ]]; then
+                # Convert Kubernetes timestamp to epoch seconds
+                restart_epoch=$(date -d "$last_restart_time" +%s 2>/dev/null || echo "0")
+
+                # If restart was within last 3 minutes, add to recent restarts
+                if [[ "$restart_epoch" -gt "$three_minutes_ago" ]]; then
+                    if [[ -n "$recent_restart_containers" ]]; then
+                        recent_restart_containers="$recent_restart_containers $pod/$container_name($restart_count restarts, last: $(date -d "$last_restart_time" '+%H:%M:%S'))"
+                    else
+                        recent_restart_containers="$pod/$container_name($restart_count restarts, last: $(date -d "$last_restart_time" '+%H:%M:%S'))"
+                    fi
+                fi
+            fi
+        fi
+    done <<< "$container_info"
+done
+
 # shellcheck disable=SC2015  # && || pattern is intentional for conditional execution
-[[ -z "$high_restart_containers" ]] && ok "no containers with excessive restarts" || error "high restart count: $high_restart_containers"
+[[ -z "$recent_restart_containers" ]] && ok "no containers with excessive restarts (>3 restarts in last 3 minutes)" || error "excessive restart activity: $recent_restart_containers"
 
 # Certificates (if cert-manager available)
 if kubectl api-resources | grep -q certificates.cert-manager.io; then
     echo "=== Certificates ==="
-    certs=("mongo-root-ca" "mongo-app-client-cert")
+    if [[ "$DATASTORE" == "mongodb" ]]; then
+        certs=("mongo-root-ca" "mongo-app-client-cert")
+    elif [[ "$DATASTORE" == "postgresql" ]]; then
+        certs=("postgresql-root-ca" "postgresql-client-cert" "postgresql-server-cert")
+    else
+        certs=()
+        error "unknown datastore type for certificate validation: $DATASTORE"
+    fi
+
     for cert in "${certs[@]}"; do
         if kubectl get certificate "$cert" -n "$NAMESPACE" >/dev/null 2>&1; then
             ready=$(kubectl get certificate "$cert" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")

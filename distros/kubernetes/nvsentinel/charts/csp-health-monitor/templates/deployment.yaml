@@ -74,7 +74,7 @@ spec:
             readOnly: true
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ include "nvsentinel.datastoreConfigName" . }}
                 optional: true
 
         - name: maintenance-notifier
@@ -104,7 +104,7 @@ spec:
             mountPath: /run/nvsentinel
           envFrom:
             - configMapRef:
-                name: mongodb-config
+                name: {{ include "nvsentinel.datastoreConfigName" . }}
                 optional: true
       restartPolicy: Always
       {{- with (.Values.global.systemNodeSelector | default .Values.nodeSelector) }}

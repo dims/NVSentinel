@@ -63,7 +63,8 @@ type HealthEventWithStatus struct {
 type DataStoreProvider string
 
 const (
-	ProviderMongoDB DataStoreProvider = "mongodb"
+	ProviderMongoDB    DataStoreProvider = "mongodb"
+	ProviderPostgreSQL DataStoreProvider = "postgresql"
 )
 
 // DataStoreConfig holds configuration for any datastore provider
