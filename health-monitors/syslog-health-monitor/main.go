@@ -24,7 +24,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/textlogger"
 
-	pb "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	fd "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/syslog-monitor"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

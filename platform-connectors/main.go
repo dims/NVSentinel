@@ -33,7 +33,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/textlogger"
 
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
 	"google.golang.org/grpc"

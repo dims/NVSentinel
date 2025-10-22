@@ -23,10 +23,10 @@ import (
 	"path/filepath"
 	"strconv"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/reconciler"
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/bson"

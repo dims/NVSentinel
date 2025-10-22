@@ -20,7 +20,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"k8s.io/client-go/util/workqueue"
 )
 

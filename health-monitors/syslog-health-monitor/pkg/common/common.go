@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	pb "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/types"
 	"github.com/thedatashed/xlsxreader"
 	"k8s.io/klog/v2"

@@ -22,8 +22,8 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
-	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"k8s.io/apimachinery/pkg/runtime"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
@@ -35,7 +35,7 @@ const (
 )
 
 type RuleEvaluator interface {
-	Evaluate(healthEvent *platformconnectorprotos.HealthEvent) (common.RuleEvaluationResult, error)
+	Evaluate(healthEvent *protos.HealthEvent) (common.RuleEvaluationResult, error)
 }
 
 type HealthEventRuleEvaluator struct {
@@ -85,7 +85,7 @@ func NewHealthEventRuleEvaluator(expression string) (*HealthEventRuleEvaluator, 
 
 // evaluates the CEL expression against the provided HealthEvent
 func (he *HealthEventRuleEvaluator) Evaluate(
-	event *platformconnectorprotos.HealthEvent) (common.RuleEvaluationResult, error) {
+	event *protos.HealthEvent) (common.RuleEvaluationResult, error) {
 	obj, err := RoundTrip(event)
 	if err != nil {
 		return common.RuleEvaluationErroredOut, fmt.Errorf("error roundtripping event: %w", err)
@@ -148,7 +148,7 @@ func NewNodeRuleEvaluator(expression string, nodeLister corelisters.NodeLister) 
 }
 
 // Evaluate the CEL expression against node metadata (labels and annotations)
-func (nm *NodeRuleEvaluator) Evaluate(event *platformconnectorprotos.HealthEvent) (common.RuleEvaluationResult, error) {
+func (nm *NodeRuleEvaluator) Evaluate(event *protos.HealthEvent) (common.RuleEvaluationResult, error) {
 	klog.Infof("Evaluating NodeRuleEvaluator for node %s", event.NodeName)
 
 	// Get node metadata

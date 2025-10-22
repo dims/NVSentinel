@@ -42,6 +42,9 @@ on:
       grpcio_tools_version:
         description: 'grpcio-tools version'
         value: ${{ jobs.load-versions.outputs.grpcio_tools_version }}
+      black_version:
+        description: 'black version'
+        value: ${{ jobs.load-versions.outputs.black_version }}
       shellcheck_version:
         description: 'shellcheck version'
         value: ${{ jobs.load-versions.outputs.shellcheck_version }}
@@ -51,18 +54,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      go_version: ${{ steps.load-versions.outputs.go_version }}
-      python_version: ${{ steps.load-versions.outputs.python_version }}
-      poetry_version: ${{ steps.load-versions.outputs.poetry_version }}
-      golangci_lint_version: ${{ steps.load-versions.outputs.golangci_lint_version }}
-      protobuf_version: ${{ steps.load-versions.outputs.protobuf_version }}
-      protoc_gen_go_version: ${{ steps.load-versions.outputs.protoc_gen_go_version }}
-      protoc_gen_go_grpc_version: ${{ steps.load-versions.outputs.protoc_gen_go_grpc_version }}
-      grpcio_tools_version: ${{ steps.load-versions.outputs.grpcio_tools_version }}
-      shellcheck_version: ${{ steps.load-versions.outputs.shellcheck_version }}
+      safe_ref_name: ${{ steps.prepare.outputs.safe_ref_name }}
+      nvcr_container_repo: ${{ steps.prepare.outputs.nvcr_container_repo }}
+      container_org: ${{ steps.prepare.outputs.container_org }}
+      # Tool version outputs
+      go_version: ${{ env.GO_VERSION }}
+      python_version: ${{ env.PYTHON_VERSION }}
+      poetry_version: ${{ env.POETRY_VERSION }}
+      golangci_lint_version: ${{ env.GOLANGCI_LINT_VERSION }}
+      protobuf_version: ${{ env.PROTOBUF_VERSION }}
+      protoc_gen_go_version: ${{ env.PROTOC_GEN_GO_VERSION }}
+      protoc_gen_go_grpc_version: ${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
+      grpcio_tools_version: ${{ env.GRPCIO_TOOLS_VERSION }}
+      black_version: ${{ env.BLACK_VERSION }}
+      shellcheck_version: ${{ env.SHELLCHECK_VERSION }}
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Prepare environment variables
+        id: prepare
+        run: |
+          # Set safe ref name for container tags
+          SAFE_REF_NAME=$(echo "${{ github.ref_name }}" | sed 's/\//-/g')
+          echo "safe_ref_name=${SAFE_REF_NAME}" >> $GITHUB_OUTPUT
+
+          # Set container repository paths
+          echo "nvcr_container_repo=nvcr.io/${{ env.CONTAINER_ORG }}/nvsentinel" >> $GITHUB_OUTPUT
+          echo "container_org=${{ env.CONTAINER_ORG }}" >> $GITHUB_OUTPUT
+
       - name: Load tool versions from .versions.yaml
         id: load-versions
         run: |

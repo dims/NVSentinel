@@ -30,7 +30,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"

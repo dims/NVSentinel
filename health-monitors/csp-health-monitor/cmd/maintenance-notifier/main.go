@@ -32,11 +32,11 @@ import (
 	klog "k8s.io/klog/v2"
 	"k8s.io/klog/v2/textlogger"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	trigger "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/triggerengine"
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 )
 
 const (

@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/klog/v2"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
