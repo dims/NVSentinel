@@ -240,6 +240,42 @@ jobs:
             tests/*.log
           retention-days: 14
 
+      - name: Export Kind logs
+        if: always()
+        run: |
+          mkdir -p /tmp/kind-logs
+          CLUSTER_NAME=$(kind get clusters | head -n1)
+          if [ -n "$CLUSTER_NAME" ]; then
+            kind export logs /tmp/kind-logs --name "$CLUSTER_NAME" || true
+          fi
+
+      - name: Collect debug artifacts
+        if: failure()
+        run: |
+          mkdir -p /tmp/debug-artifacts
+          kubectl get all --all-namespaces > /tmp/debug-artifacts/all-resources.yaml || true
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp' > /tmp/debug-artifacts/all-events.yaml || true
+          kubectl get pods --all-namespaces -o yaml > /tmp/debug-artifacts/all-pods.yaml || true
+          kubectl logs --all-namespaces --all-containers=true --tail=500 > /tmp/debug-artifacts/all-logs.txt || true
+          docker images > /tmp/debug-artifacts/docker-images.txt || true
+          df -h > /tmp/debug-artifacts/disk-usage.txt || true
+
+      - name: Upload Kind logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-kind-logs-${{ matrix.arch }}-${{ github.run_id }}
+          path: /tmp/kind-logs/
+          retention-days: 7
+
+      - name: Upload debug artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-debug-artifacts-${{ matrix.arch }}-${{ github.run_id }}
+          path: /tmp/debug-artifacts/
+          retention-days: 7
+
       - name: Cleanup Docker resources
         if: always()
         run: |
