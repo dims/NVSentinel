@@ -1,4 +1,4 @@
-# Platform Connectors Makefile
+# Data Models Makefile
 # Individual module build and test targets
 
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
@@ -19,22 +19,16 @@
 # MODULE-SPECIFIC CONFIGURATION
 # =============================================================================
 
-# Platform-connectors specific settings
+# Data-models specific settings
 LINT_EXTRA_FLAGS := --out-format code-climate:code-quality-report.json,colored-line-number
-CLEAN_EXTRA_FILES := platform-connectors
+CLEAN_EXTRA_FILES :=
 
-# No protobuf packages to exclude - using data-models
-TEST_EXCLUDE_PACKAGES :=
-
-# Special kubebuilder setup for envtest-based tests
-TEST_SETUP_COMMANDS := export PATH="$$GOPATH/bin:$$PATH" && \
-                      go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
-                      export KUBEBUILDER_ASSETS=$$(setup-envtest use -p path 1.30.0) &&
+# Exclude protobuf files from test coverage
+TEST_EXCLUDE_PACKAGES := -e pkg/protos
 
 # Docker configuration
-HAS_DOCKER := 1
+HAS_DOCKER := 0
 DOCKER_EXTRA_ARGS :=
-
 
 # =============================================================================
 # INCLUDE COMMON DEFINITIONS
@@ -43,17 +37,34 @@ DOCKER_EXTRA_ARGS :=
 include ../common.mk
 
 # =============================================================================
-# NOTE: Protobuf generation removed - platform-connectors now uses data-models
+# MODULE-SPECIFIC TARGETS
 # =============================================================================
 
-# =============================================================================
-# MODULE-SPECIFIC OVERRIDES
-# =============================================================================
+# Generate protobuf files for data-models
+.PHONY: protos-generate
+protos-generate: protos-clean
+	@echo "Generating protobuf files for data-models..."
+	@echo "=== Tool Versions ==="
+	@echo "Go: $$(go version)"
+	@echo "protoc: $$(protoc --version)"
+	@echo "protoc-gen-go: $$(protoc-gen-go --version)"
+	@echo "protoc-gen-go-grpc: $$(protoc-gen-go-grpc --version)"
+	@echo "========================"
+	protoc -I protobufs/ \
+		--go_out=pkg/protos/ --go_opt=paths=source_relative \
+		--go-grpc_out=pkg/protos/ --go-grpc_opt=paths=source_relative \
+		protobufs/health_event.proto
 
-# Override test target to exclude protobuf packages and set up envtest
+# Clean generated protobuf files
+.PHONY: protos-clean
+protos-clean:
+	@echo "Cleaning generated protobuf files in data-models..."
+	@echo "Removing Go protobuf files (.pb.go)..."
+	find pkg/protos/ -name "*.pb.go" -type f -delete 2>/dev/null || true
+
+# Override test target to exclude protobuf packages
 test:
 	@echo "Running tests on $(MODULE_NAME)..."
-	$(TEST_SETUP_COMMANDS) \
 	$(GOTESTSUM) --junitfile report.xml -- -race $(TEST_EXTRA_FLAGS) $$(go list ./... | grep -v $(TEST_EXCLUDE_PACKAGES)) -coverprofile=coverage.txt -covermode atomic
 
 # Override lint-test to use the custom test target
@@ -66,33 +77,17 @@ lint-test:
 	$(GOCOVER_COBERTURA) < coverage.txt > coverage.xml
 
 # =============================================================================
-# LEGACY COMPATIBILITY
-# =============================================================================
-
-# Legacy targets for backwards compatibility
-.PHONY: image publish
-image: docker-build
-	@echo "Legacy 'image' target - use 'docker-build' for local development"
-
-publish: docker-publish
-	@echo "Legacy 'publish' target - use 'docker-publish' for CI/production"
-
-# =============================================================================
 # MODULE HELP
 # =============================================================================
 
 help:
-	@echo "Platform Connectors Makefile - Using nvsentinel common.mk standards"
+	@echo "Data Models Makefile - Using nvsentinel common.mk standards"
 	@echo ""
-	@echo "This module handles platform-specific connectors for health metrics."
+	@echo "This module contains shared data models and protobuf definitions."
 	@echo ""
 	@echo "Configuration (environment variables):"
 	@echo "  MODULE_NAME=$(MODULE_NAME)"
 	@echo "  REPO_ROOT=$(REPO_ROOT)"
-	@echo "  NVCR_CONTAINER_REPO=$(NVCR_CONTAINER_REPO)"
-	@echo "  NGC_ORG=$(NGC_ORG)"
-	@echo "  SAFE_REF_NAME=$(SAFE_REF_NAME)"
-	@echo "  PLATFORMS=$(PLATFORMS)"
 	@echo "  HAS_DOCKER=$(HAS_DOCKER)"
 	@echo ""
 	@echo "Main targets:"
@@ -105,21 +100,17 @@ help:
 	@echo "  test       - Run tests with coverage (excludes protobuf packages)"
 	@echo "  coverage   - Generate coverage reports"
 	@echo "  build      - Build the module"
-	@echo "  binary     - Build the main binary"
 	@echo ""
-	@echo "Docker targets:"
-	@echo "  docker-build    - Build Docker image (local development)"
-	@echo "  docker-publish  - Build and publish Docker image (CI/production)"
-	@echo "  setup-buildx    - Setup Docker buildx builder"
-	@echo "  image           - Legacy target (calls docker-build)"
-	@echo "  publish         - Legacy target (calls docker-publish)"
+	@echo "Protobuf targets:"
+	@echo "  protos-generate - Generate protobuf Go files from .proto sources"
+	@echo "  protos-clean    - Remove generated protobuf files"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  clean      - Clean build artifacts and reports"
 	@echo "  help       - Show this help message"
 	@echo ""
 	@echo "Module-specific notes:"
+	@echo "  - Contains shared data models and protobuf definitions"
 	@echo "  - Excludes protobuf packages from test coverage"
-	@echo "  - Uses code-climate format for lint output"
-	@echo "  - Runs tests with -short flag for faster execution"
-	@echo "  - Uses standardized repo-root Docker build context"
+	@echo "  - No Docker builds (library module only)"
+	@echo "  - Uses standardized nvsentinel build patterns"

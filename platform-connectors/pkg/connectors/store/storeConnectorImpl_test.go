@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/stretchr/testify/mock"
@@ -111,8 +111,8 @@ func TestInsertHealthEvents(t *testing.T) {
 			nodeName:   nodeName,
 		}
 
-		healthEvents := &platformconnector.HealthEvents{
-			Events: []*platformconnector.HealthEvent{{ComponentClass: "abc"}},
+		healthEvents := &protos.HealthEvents{
+			Events: []*protos.HealthEvent{{ComponentClass: "abc"}},
 		}
 
 		err := connector.insertHealthEvents(context.Background(), healthEvents)
@@ -137,8 +137,8 @@ func TestInsertHealthEvents(t *testing.T) {
 			nodeName:   nodeName,
 		}
 
-		healthEvents := &platformconnector.HealthEvents{
-			Events: []*platformconnector.HealthEvent{{ComponentClass: "abc"}},
+		healthEvents := &protos.HealthEvents{
+			Events: []*protos.HealthEvent{{ComponentClass: "abc"}},
 		}
 
 		err := connector.insertHealthEvents(context.Background(), healthEvents)
@@ -172,10 +172,10 @@ func TestFetchAndProcessHealthMetric(t *testing.T) {
 			nodeName:   nodeName,
 		}
 
-		healthEvent := &platformconnector.HealthEvent{}
+		healthEvent := &protos.HealthEvent{}
 
-		healthEvents := &platformconnector.HealthEvents{
-			Events: []*platformconnector.HealthEvent{healthEvent},
+		healthEvents := &protos.HealthEvents{
+			Events: []*protos.HealthEvent{healthEvent},
 		}
 
 		ringBuffer.Enqueue(healthEvents)
@@ -217,10 +217,10 @@ func TestFetchAndProcessHealthMetric(t *testing.T) {
 			nodeName:   nodeName,
 		}
 
-		healthEvent := &platformconnector.HealthEvent{}
+		healthEvent := &protos.HealthEvent{}
 
-		healthEvents := &platformconnector.HealthEvents{
-			Events: []*platformconnector.HealthEvent{healthEvent},
+		healthEvents := &protos.HealthEvents{
+			Events: []*protos.HealthEvent{healthEvent},
 		}
 
 		ringBuffer.Enqueue(healthEvents)

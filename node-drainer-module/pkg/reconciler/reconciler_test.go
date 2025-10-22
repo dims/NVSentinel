@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
+	platform_connectors "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/config"
-	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"github.com/nvidia/nvsentinel/statemanager"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/stretchr/testify/assert"

@@ -24,7 +24,7 @@ import (
 	"text/template"
 	"time"
 
-	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/common"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -66,7 +66,7 @@ type TemplateData struct {
 	TemplateMountPath string
 	TemplateFileName  string
 	HealthEventID     string
-	RecommendedAction platform_connectors.RecommenedAction
+	RecommendedAction protos.RecommenedAction
 }
 
 // nolint: cyclop // todo
@@ -172,7 +172,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(ctx context.Context, 
 
 // generateMaintenanceResource generates the unstructured maintenance resource from template
 func (c *FaultRemediationClient) generateMaintenanceResource(
-	healthEvent *platform_connectors.HealthEvent,
+	healthEvent *protos.HealthEvent,
 	healthEventID string,
 ) (*unstructured.Unstructured, *meta.RESTMapping, error) {
 	log.Printf("Creating RebootNode CR for node: %s", healthEvent.NodeName)

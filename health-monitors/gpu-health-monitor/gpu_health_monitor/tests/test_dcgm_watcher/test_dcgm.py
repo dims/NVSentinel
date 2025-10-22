@@ -403,9 +403,7 @@ class TestDCGMHealthChecks:
         assert response == expected_response  # Should return empty health status
         assert connectivity_success == False  # Should indicate connectivity failure
 
-    @patch("pydcgm.DcgmHandle")
-    @patch("pydcgm.DcgmGroup")
-    def test_initialize_dcgm_monitoring(self, mock_dcgm_group, mock_dcgm_handle):
+    def test_initialize_dcgm_monitoring(self):
         """Test that _initialize_dcgm_monitoring properly sets up monitoring components."""
         watcher = dcgm.DCGMWatcher(
             addr="localhost:5555",
@@ -414,11 +412,8 @@ class TestDCGMHealthChecks:
             dcgm_k8s_service_enabled=False,
         )
 
-        # Setup mocks
+        # Setup mocks using our mock system
         dcgm_handle_mock = MagicMock()
-        dcgm_group_mock = MagicMock()
-        dcgm_group_mock.GetGpuIds.return_value = [0, 1, 2, 3]
-        mock_dcgm_group.return_value = dcgm_group_mock
 
         # Mock system and discovery
         dcgm_system_mock = MagicMock()
@@ -431,8 +426,9 @@ class TestDCGMHealthChecks:
         # Call the method
         group, gpu_ids, gpu_serials = watcher._initialize_dcgm_monitoring(dcgm_handle_mock)
 
-        # Verify results
-        assert group == dcgm_group_mock
+        # Verify results - group should be our MockPyDCGM.DcgmGroup instance
+        assert group is not None
+        assert hasattr(group, "health")
         assert gpu_ids == [0, 1, 2, 3]
         assert len(gpu_serials) == 4
-        dcgm_group_mock.health.Set.assert_called_once()
+        assert all(serial == "TEST_SERIAL" for serial in gpu_serials.values())

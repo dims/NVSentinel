@@ -17,8 +17,8 @@ package parser
 import (
 	"testing"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/common"
-	pb "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/protos"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

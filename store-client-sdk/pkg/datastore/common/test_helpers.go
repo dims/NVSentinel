@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"github.com/stretchr/testify/suite"
@@ -130,8 +130,8 @@ func (s *BaseDataStoreTestSuite) TestHealthEventOperations() {
 	s.Assert().Len(events, 1, "Should find one event")
 
 	// Type assert to get the concrete type
-	healthEvent, ok := events[0].HealthEvent.(*platformconnector.HealthEvent)
-	s.Assert().True(ok, "HealthEvent should be of type *platformconnector.HealthEvent")
+	healthEvent, ok := events[0].HealthEvent.(*protos.HealthEvent)
+	s.Assert().True(ok, "HealthEvent should be of type *protos.HealthEvent")
 	s.Assert().Equal("test-node-1", healthEvent.NodeName, "Node name should match")
 }
 
@@ -171,7 +171,7 @@ func CreateTestMaintenanceEvent(eventID, nodeName string) *model.MaintenanceEven
 func CreateTestHealthEvent(nodeName string) *datastore.HealthEventWithStatus {
 	return &datastore.HealthEventWithStatus{
 		CreatedAt: time.Now().UTC(),
-		HealthEvent: &platformconnector.HealthEvent{
+		HealthEvent: &protos.HealthEvent{
 			NodeName:       nodeName,
 			Agent:          "test-agent",
 			ComponentClass: "GPU",
@@ -341,9 +341,9 @@ func AssertHealthEvent(t *testing.T, eventWithStatus *datastore.HealthEventWithS
 		t.Fatal("Event should not be nil")
 	}
 
-	healthEvent, ok := eventWithStatus.HealthEvent.(*platformconnector.HealthEvent)
+	healthEvent, ok := eventWithStatus.HealthEvent.(*protos.HealthEvent)
 	if !ok {
-		t.Fatal("HealthEvent should be of type *platformconnector.HealthEvent")
+		t.Fatal("HealthEvent should be of type *protos.HealthEvent")
 	}
 
 	if healthEvent.NodeName != expectedNode {

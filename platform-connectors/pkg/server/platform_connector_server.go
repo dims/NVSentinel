@@ -18,7 +18,7 @@ import (
 	"context"
 
 	"github.com/golang/protobuf/ptypes/empty"
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"

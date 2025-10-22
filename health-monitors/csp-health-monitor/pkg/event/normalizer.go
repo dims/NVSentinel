@@ -17,7 +17,7 @@ package event
 import (
 	"fmt"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 )
 
 // Normalizer defines the interface for transforming raw CSP events

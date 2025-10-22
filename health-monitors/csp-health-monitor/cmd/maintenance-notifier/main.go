@@ -31,10 +31,10 @@ import (
 	"k8s.io/client-go/rest"
 	klog "k8s.io/klog/v2"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	trigger "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/triggerengine"
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers"

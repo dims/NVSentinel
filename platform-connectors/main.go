@@ -33,7 +33,8 @@ import (
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"k8s.io/klog/v2"
 
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	// Import data-models protos for gRPC service interface
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
 	"google.golang.org/grpc"

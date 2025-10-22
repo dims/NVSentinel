@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
-	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 
 	// Generic datastore interfaces (no MongoDB dependencies)
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
@@ -38,7 +38,7 @@ type mockPublisher struct {
 	mock.Mock
 }
 
-func (m *mockPublisher) HealthEventOccuredV1(ctx context.Context, events *platform_connectors.HealthEvents, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (m *mockPublisher) HealthEventOccuredV1(ctx context.Context, events *protos.HealthEvents, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	args := m.Called(ctx, events)
 	return args.Get(0).(*emptypb.Empty), args.Error(1)
 }
@@ -152,9 +152,9 @@ var (
 	}
 	healthEvent = datastore.HealthEventWithStatus{
 		CreatedAt: time.Now(),
-		HealthEvent: &platform_connectors.HealthEvent{
+		HealthEvent: &protos.HealthEvent{
 			NodeName: "node1",
-			EntitiesImpacted: []*platform_connectors.Entity{{
+			EntitiesImpacted: []*protos.Entity{{
 				EntityType:  "GPU",
 				EntityValue: "1",
 			}},
@@ -237,7 +237,7 @@ func TestBuildFilterFromSequenceCriteria(t *testing.T) {
 	timeWindow := 5 * time.Minute
 
 	// Type assert for the test
-	testHealthEvent, ok := healthEvent.HealthEvent.(*platform_connectors.HealthEvent)
+	testHealthEvent, ok := healthEvent.HealthEvent.(*protos.HealthEvent)
 	assert.True(t, ok, "HealthEvent should be of correct type")
 
 	filter, err := reconciler.buildFilterFromSequenceCriteria(criteria, timeWindow, testHealthEvent)
@@ -264,12 +264,12 @@ func TestHandleEvent(t *testing.T) {
 		mockPublisher := &mockPublisher{}
 
 		// Type assert for this test scope
-		expectedHealthEvent, ok := healthEvent.HealthEvent.(*platform_connectors.HealthEvent)
+		expectedHealthEvent, ok := healthEvent.HealthEvent.(*protos.HealthEvent)
 		assert.True(t, ok, "HealthEvent should be of correct type")
 
-		expectedHealthEvents := &platform_connectors.HealthEvents{
+		expectedHealthEvents := &protos.HealthEvents{
 			Version: 1,
-			Events:  []*platform_connectors.HealthEvent{expectedHealthEvent},
+			Events:  []*protos.HealthEvent{expectedHealthEvent},
 		}
 		mockPublisher.On("HealthEventOccuredV1", ctx, expectedHealthEvents).Return(&emptypb.Empty{}, nil)
 		mockDataStore.On("HealthEventStore").Return(mockHealthEventStore)
@@ -297,9 +297,9 @@ func TestHandleEvent(t *testing.T) {
 	t.Run("no rules match", func(t *testing.T) {
 		nonMatchingEvent := datastore.HealthEventWithStatus{
 			CreatedAt: time.Now(),
-			HealthEvent: &platform_connectors.HealthEvent{
+			HealthEvent: &protos.HealthEvent{
 				NodeName: "node1",
-				EntitiesImpacted: []*platform_connectors.Entity{{
+				EntitiesImpacted: []*protos.Entity{{
 					EntityType:  "GPU",
 					EntityValue: "0",
 				}},

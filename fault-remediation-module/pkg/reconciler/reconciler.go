@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/statemanager"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/common"
@@ -69,13 +69,13 @@ func (r *Reconciler) shouldSkipEvent(healthEventWithStatus datastore.HealthEvent
 	nodeName := healthEvent.NodeName
 
 	switch action { // nolint:exhaustive  // we need to trim down the number of recommended actions
-	case platformconnectorprotos.RecommenedAction_NONE:
+	case protos.RecommenedAction_NONE:
 		// NONE means no remediation needed
 		klog.Infof("Skipping event for node: %s, recommended action is NONE (no remediation needed)", nodeName)
 		return true
-	case platformconnectorprotos.RecommenedAction_COMPONENT_RESET,
-		platformconnectorprotos.RecommenedAction_RESTART_VM,
-		platformconnectorprotos.RecommenedAction_RESTART_BM:
+	case protos.RecommenedAction_COMPONENT_RESET,
+		protos.RecommenedAction_RESTART_VM,
+		protos.RecommenedAction_RESTART_BM:
 		// need to reboot the node, hence process this event
 		return false
 	default:
@@ -150,7 +150,7 @@ func (r *Reconciler) Start(ctx context.Context) {
 		}
 
 		// Run log collector for all non-NONE actions if enabled (matching main branch)
-		if healthEvent.RecommendedAction != platformconnectorprotos.RecommenedAction_NONE &&
+		if healthEvent.RecommendedAction != protos.RecommenedAction_NONE &&
 			r.Config.EnableLogCollector {
 			klog.Infof("Log collector feature enabled; running log collector for node %s", healthEvent.NodeName)
 

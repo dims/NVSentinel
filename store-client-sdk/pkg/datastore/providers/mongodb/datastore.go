@@ -23,8 +23,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -614,9 +614,9 @@ func (s *MongoStore) InsertHealthEvents(ctx context.Context, eventWithStatus *da
 	healthEventsCollection := s.client.Database().Collection("HealthEvents")
 
 	// Type assert the HealthEvent to the proper concrete type
-	healthEvent, ok := eventWithStatus.HealthEvent.(*platform_connectors.HealthEvent)
+	healthEvent, ok := eventWithStatus.HealthEvent.(*protos.HealthEvent)
 	if !ok {
-		return fmt.Errorf("expected *platform_connectors.HealthEvent, got %T", eventWithStatus.HealthEvent)
+		return fmt.Errorf("expected *protos.HealthEvent, got %T", eventWithStatus.HealthEvent)
 	}
 
 	// Create a document with both structured fields for indexing and the full document

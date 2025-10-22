@@ -21,10 +21,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"google.golang.org/grpc/codes"

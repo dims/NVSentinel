@@ -24,19 +24,16 @@ ENV CGO_ENABLED=0
 
 WORKDIR /go/src
 
-# Copy go modules and dependencies
+# Copy go modules and dependencies (based on go.mod replace directives)
 COPY fault-remediation-module/go.mod fault-remediation-module/go.sum ./fault-remediation-module/
 COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
-COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
 COPY statemanager/go.mod statemanager/go.sum ./statemanager/
-COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
-COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+COPY data-models/go.mod data-models/go.sum data-models/
 
 # Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/
-COPY platform-connectors/ ./platform-connectors/
 COPY statemanager/ ./statemanager/
-COPY health-monitors/ ./health-monitors/
+COPY data-models/ ./data-models/
 
 # Copy main module source
 COPY fault-remediation-module/ ./fault-remediation-module/

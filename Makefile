@@ -17,11 +17,16 @@ GOLANGCI_LINT_VERSION := v1.64.8
 GOTESTSUM_VERSION := latest
 GOCOVER_COBERTURA_VERSION := latest
 GO_VERSION := 1.24.8
+PROTOBUF_VERSION := v27.1
+PROTOC_GEN_GO_VERSION := v1.36.6
+PROTOC_GEN_GO_GRPC_VERSION := v1.3.0
+GRPCIO_TOOLS_VERSION := 1.75.1
 
 # Go modules with specific patterns from CI
 GO_MODULES := \
 	health-monitors/syslog-health-monitor \
 	health-monitors/csp-health-monitor \
+	data-models \
 	platform-connectors \
 	health-events-analyzer \
 	fault-quarantine-module \
@@ -59,7 +64,7 @@ all: lint-test-all
 
 # Install lint tools
 .PHONY: install-lint-tools
-install-lint-tools: install-golangci-lint install-gotestsum install-gocover-cobertura
+install-lint-tools: install-golangci-lint install-gotestsum install-gocover-cobertura install-protobuf-tools
 	@echo "All lint tools installed successfully"
 	@echo ""
 	@echo "=== Installed Tool Versions and Locations ==="
@@ -82,6 +87,32 @@ install-lint-tools: install-golangci-lint install-gotestsum install-gocover-cobe
 		echo "    Location: $$(which gocover-cobertura)"; \
 	else \
 		echo "gocover-cobertura: not found"; \
+	fi
+	@if command -v protoc >/dev/null 2>&1; then \
+		echo "protoc: $$(protoc --version 2>/dev/null || echo 'version command not available')"; \
+		echo "    Location: $$(which protoc)"; \
+	else \
+		echo "protoc: not found"; \
+	fi
+	@if command -v protoc-gen-go >/dev/null 2>&1; then \
+		echo "protoc-gen-go: $$(protoc-gen-go --version 2>/dev/null || echo 'version command not available')"; \
+		echo "    Location: $$(which protoc-gen-go)"; \
+	else \
+		echo "protoc-gen-go: not found"; \
+	fi
+	@if command -v protoc-gen-go-grpc >/dev/null 2>&1; then \
+		echo "protoc-gen-go-grpc: $$(protoc-gen-go-grpc --version 2>/dev/null || echo 'version command not available')"; \
+		echo "    Location: $$(which protoc-gen-go-grpc)"; \
+	else \
+		echo "protoc-gen-go-grpc: not found"; \
+	fi
+	@if command -v python3 >/dev/null 2>&1; then \
+		grpcio_version=$$(python3 -c "import grpc; print('grpcio', grpc.__version__)" 2>/dev/null || echo "grpcio: not installed"); \
+		grpcio_tools_version=$$(python3 -c "import grpc_tools; print('grpcio-tools', grpc_tools.__version__)" 2>/dev/null || echo "grpcio-tools: not installed"); \
+		echo "$$grpcio_version"; \
+		echo "$$grpcio_tools_version"; \
+	else \
+		echo "python3: not found"; \
 	fi
 	@echo "=============================================="
 
@@ -125,6 +156,136 @@ install-gocover-cobertura:
 		$(GO) install github.com/boumenot/gocover-cobertura@$(GOCOVER_COBERTURA_VERSION); \
 	else \
 		echo "gocover-cobertura is already installed"; \
+	fi
+
+# Install protobuf tools
+.PHONY: install-protobuf-tools
+install-protobuf-tools: install-protoc install-protoc-gen-go install-protoc-gen-go-grpc install-grpcio-tools
+	@echo "All protobuf tools installed successfully"
+
+# Install protoc
+.PHONY: install-protoc
+install-protoc:
+	@echo "Installing protoc $(PROTOBUF_VERSION)..."
+	@if command -v protoc >/dev/null 2>&1; then \
+		current_version=$$(protoc --version 2>/dev/null | grep -o '[0-9]\+\.[0-9]\+' || echo "unknown"); \
+		target_version=$$(echo "$(PROTOBUF_VERSION)" | sed 's/^v//'); \
+		if [ "$$current_version" = "$$target_version" ]; then \
+			echo "protoc $$current_version is already installed at $$(which protoc)"; \
+		else \
+			echo "Current protoc version: $$current_version, installing $(PROTOBUF_VERSION)..."; \
+			$(MAKE) _install-protoc-binary; \
+		fi; \
+	else \
+		echo "protoc not found, installing $(PROTOBUF_VERSION)..."; \
+		$(MAKE) _install-protoc-binary; \
+	fi
+
+# Internal target to install protoc binary
+.PHONY: _install-protoc-binary
+_install-protoc-binary:
+	@OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	ARCH=$$(uname -m); \
+	case "$$ARCH" in \
+		x86_64) ARCH=x86_64 ;; \
+		aarch64|arm64) ARCH=aarch_64 ;; \
+		*) echo "Unsupported architecture: $$ARCH" && exit 1 ;; \
+	esac; \
+	case "$$OS" in \
+		linux) PLATFORM=linux ;; \
+		darwin) PLATFORM=osx ;; \
+		*) echo "Unsupported platform: $$OS" && exit 1 ;; \
+	esac; \
+	echo "Detected platform: $$PLATFORM-$$ARCH"; \
+	\
+	PROTOC_VERSION=$$(echo "$(PROTOBUF_VERSION)" | sed 's/^v//'); \
+	PROTOC_ZIP="protoc-$$PROTOC_VERSION-$$PLATFORM-$$ARCH.zip"; \
+	PROTOC_URL="https://github.com/protocolbuffers/protobuf/releases/download/$(PROTOBUF_VERSION)/$$PROTOC_ZIP"; \
+	echo "Downloading $$PROTOC_URL..."; \
+	\
+	if command -v curl >/dev/null 2>&1; then \
+		curl -sSL "$$PROTOC_URL" -o "$$PROTOC_ZIP" || (echo "Failed to download protoc" && exit 1); \
+	elif command -v wget >/dev/null 2>&1; then \
+		wget -q "$$PROTOC_URL" || (echo "Failed to download protoc" && exit 1); \
+	else \
+		echo "Neither curl nor wget found. Please install one of them." && exit 1; \
+	fi; \
+	\
+	echo "Extracting protoc $(PROTOBUF_VERSION)..."; \
+	if [ "$$OS" = "darwin" ]; then \
+		unzip -q "$$PROTOC_ZIP"; \
+		sudo cp bin/protoc /usr/local/bin/; \
+		sudo cp -r include/* /usr/local/include/; \
+		echo "protoc $(PROTOBUF_VERSION) installed to /usr/local/bin/protoc"; \
+	else \
+		unzip -q "$$PROTOC_ZIP"; \
+		sudo cp bin/protoc /usr/local/bin/; \
+		sudo cp -r include/* /usr/local/include/; \
+		echo "protoc $(PROTOBUF_VERSION) installed to /usr/local/bin/protoc"; \
+	fi; \
+	\
+	rm -f "$$PROTOC_ZIP" bin/protoc; \
+	rm -rf include readme.txt; \
+	echo "protoc installation complete"; \
+	\
+	if [ -x /usr/local/bin/protoc ]; then \
+		echo "Installed protoc version: $$(/usr/local/bin/protoc --version)"; \
+		echo "Location: /usr/local/bin/protoc"; \
+	else \
+		echo "Warning: protoc binary not found at expected location /usr/local/bin/protoc"; \
+	fi
+
+# Install protoc-gen-go
+.PHONY: install-protoc-gen-go
+install-protoc-gen-go:
+	@echo "Installing protoc-gen-go $(PROTOC_GEN_GO_VERSION)..."
+	@if ! command -v protoc-gen-go >/dev/null 2>&1; then \
+		echo "protoc-gen-go not found, installing..."; \
+		$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION); \
+	else \
+		current_version=$$(protoc-gen-go --version 2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "unknown"); \
+		if [ "$$current_version" = "$(PROTOC_GEN_GO_VERSION)" ]; then \
+			echo "protoc-gen-go $(PROTOC_GEN_GO_VERSION) is already installed at $$(which protoc-gen-go)"; \
+		else \
+			echo "Current protoc-gen-go version: $$current_version, installing $(PROTOC_GEN_GO_VERSION)..."; \
+			$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION); \
+		fi; \
+	fi
+
+# Install protoc-gen-go-grpc
+.PHONY: install-protoc-gen-go-grpc
+install-protoc-gen-go-grpc:
+	@echo "Installing protoc-gen-go-grpc $(PROTOC_GEN_GO_GRPC_VERSION)..."
+	@if ! command -v protoc-gen-go-grpc >/dev/null 2>&1; then \
+		echo "protoc-gen-go-grpc not found, installing..."; \
+		$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION); \
+	else \
+		current_version=$$(protoc-gen-go-grpc --version 2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "unknown"); \
+		if [ "$$current_version" = "$(PROTOC_GEN_GO_GRPC_VERSION)" ]; then \
+			echo "protoc-gen-go-grpc $(PROTOC_GEN_GO_GRPC_VERSION) is already installed at $$(which protoc-gen-go-grpc)"; \
+		else \
+			echo "Current protoc-gen-go-grpc version: $$current_version, installing $(PROTOC_GEN_GO_GRPC_VERSION)..."; \
+			$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION); \
+		fi; \
+	fi
+
+# Install grpcio-tools
+.PHONY: install-grpcio-tools
+install-grpcio-tools:
+	@echo "Installing grpcio-tools $(GRPCIO_TOOLS_VERSION)..."
+	@if command -v python3 >/dev/null 2>&1; then \
+		echo "Installing grpcio-tools $(GRPCIO_TOOLS_VERSION) with pip..."; \
+		OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+		if [ "$$OS" = "darwin" ]; then \
+			pip3 install --break-system-packages grpcio==$(GRPCIO_TOOLS_VERSION) grpcio-tools==$(GRPCIO_TOOLS_VERSION) || \
+			python3 -m pip install --break-system-packages grpcio==$(GRPCIO_TOOLS_VERSION) grpcio-tools==$(GRPCIO_TOOLS_VERSION); \
+		else \
+			pip3 install grpcio==$(GRPCIO_TOOLS_VERSION) grpcio-tools==$(GRPCIO_TOOLS_VERSION) || \
+			python3 -m pip install grpcio==$(GRPCIO_TOOLS_VERSION) grpcio-tools==$(GRPCIO_TOOLS_VERSION); \
+		fi; \
+	else \
+		echo "Python3 not found, cannot install grpcio-tools"; \
+		exit 1; \
 	fi
 
 # Install Go $(GO_VERSION) for CI environments (Linux and macOS, amd64 and arm64)
@@ -200,23 +361,25 @@ health-monitors-lint-test-all:
 	@echo "Running lint and tests for all health monitors..."
 	$(MAKE) -C health-monitors lint-test-all
 
-# Generate protobuf files
+# Generate protobuf files centrally in data-models
 .PHONY: protos-generate
 protos-generate: protos-clean
-	@echo "Generating protobuf files..."
+	@echo "Generating protobuf files in data-models (centralized approach)..."
 	@echo "=== Tool Versions ==="
 	@echo "Go: $$(go version)"
 	@echo "protoc: $$(protoc --version)"
 	@echo "protoc-gen-go: $$(protoc-gen-go --version)"
-	@echo "protoc-gen-go-grpc: $$(protoc-gen-go-grpc --version)"
+	@if command -v python3 >/dev/null 2>&1; then \
+		grpcio_tools_version=$$(python3 -c "import grpc_tools; print('grpcio-tools', grpc_tools.__version__)" 2>/dev/null || echo "grpcio-tools: not installed"); \
+		echo "$$grpcio_tools_version"; \
+	fi
 	@echo "========================"
-	protoc -I protobufs/ --go_out=platform-connectors/pkg/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=platform-connectors/pkg/protos/ protobufs/platformconnector.proto
-	protoc -I protobufs/ --go_out=health-monitors/syslog-health-monitor/pkg/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=health-monitors/syslog-health-monitor/pkg/protos/ protobufs/platformconnector.proto
-	protoc -I protobufs/ --go_out=health-events-analyzer/pkg/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=health-events-analyzer/pkg/protos/ protobufs/platformconnector.proto
-	protoc -I protobufs/ --go_out=tilt/simple-health-client/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=tilt/simple-health-client/protos/ protobufs/platformconnector.proto
-	python3 -m grpc_tools.protoc -Iprotobufs/ --python_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos --pyi_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos --grpc_python_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos protobufs/platformconnector.proto
+	# Generate Go protobuf files in data-models (shared location)
+	$(MAKE) -C data-models protos-generate
+	# Generate Python protobuf files for gpu-health-monitor (special case)
+	python3 -m grpc_tools.protoc -Idata-models/protobufs/ --python_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos --pyi_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos --grpc_python_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos data-models/protobufs/health_event.proto
 	@SED_CMD=$$(command -v gsed 2>/dev/null || command -v sed); \
-	$$SED_CMD -i 's/^import platformconnector_pb2 as platformconnector__pb2$$/from . import platformconnector_pb2 as platformconnector__pb2/' health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos/platformconnector_pb2_grpc.py
+	$$SED_CMD -i 's/^import health_event_pb2 as health__event__pb2$$/from . import health_event_pb2 as health__event__pb2/' health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos/health_event_pb2_grpc.py
 
 # Check protobuf files
 .PHONY: protos-lint
@@ -303,6 +466,11 @@ python-lint-test-all:
 	done
 
 # Individual non-health-monitor Go module lint-test targets
+
+.PHONY: lint-test-data-models
+lint-test-data-models:
+	@echo "Linting and testing data-models (using standardized Makefile)..."
+	$(MAKE) -C data-models lint-test
 
 .PHONY: lint-test-platform-connectors
 lint-test-platform-connectors:
@@ -565,7 +733,8 @@ help:
 	@echo "Main targets:"
 	@echo "  all                    - Run lint-test-all (default)"
 	@echo "  lint-test-all          - Lint and test all modules"
-	@echo "  install-lint-tools     - Install required lint tools (golangci-lint, gotestsum, etc.)"
+	@echo "  install-lint-tools     - Install required lint tools (golangci-lint, gotestsum, protobuf tools, etc.)"
+	@echo "  install-protobuf-tools - Install protobuf tools (protoc, protoc-gen-go, protoc-gen-go-grpc, grpcio-tools)"
 	@echo "  install-go-ci          - Install Go $(GO_VERSION) for CI environments (Linux/macOS, amd64/arm64)"
 	@echo "  protos-generate        - Generate protobuf files from .proto sources"
 	@echo "  protos-lint            - Generate and check protobuf files"

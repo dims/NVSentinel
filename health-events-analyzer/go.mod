@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.8
 
 require (
-	github.com/nvidia/nvsentinel/platform-connectors v0.0.0
+	github.com/nvidia/nvsentinel/data-models v0.0.0
 	github.com/nvidia/nvsentinel/store-client-sdk v0.0.0-20250901050746-391b5ab7018d
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
@@ -16,9 +16,9 @@ require (
 )
 
 require (
-	github.com/kr/text v0.2.0 // indirect
-	github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor v0.0.0-20250925191603-a792a718089a // indirect
 	go.mongodb.org/mongo-driver v1.17.4 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
@@ -53,24 +53,6 @@ require (
 )
 
 // Local replacements for internal modules
-replace github.com/nvidia/nvsentinel/statemanager => ../statemanager
-
-replace github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor => ../health-monitors/csp-health-monitor
-
-replace github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor => ../health-monitors/syslog-health-monitor
-
-replace github.com/nvidia/nvsentinel/platform-connectors => ../platform-connectors
-
 replace github.com/nvidia/nvsentinel/store-client-sdk => ../store-client-sdk
 
-replace github.com/nvidia/nvsentinel/health-event-client => ../health-event-client
-
-replace github.com/nvidia/nvsentinel/health-events-analyzer => ../health-events-analyzer
-
-replace github.com/nvidia/nvsentinel/fault-quarantine-module => ../fault-quarantine-module
-
-replace github.com/nvidia/nvsentinel/labeler-module => ../labeler-module
-
-replace github.com/nvidia/nvsentinel/node-drainer-module => ../node-drainer-module
-
-replace github.com/nvidia/nvsentinel/fault-remediation-module => ../fault-remediation-module
+replace github.com/nvidia/nvsentinel/data-models => ../data-models

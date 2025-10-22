@@ -20,7 +20,7 @@ import (
 	"os"
 	"time"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
@@ -109,7 +109,7 @@ func (r *StoreConnector) FetchAndProcessHealthMetric(ctx context.Context) {
 
 func (r *StoreConnector) insertHealthEvents(
 	ctx context.Context,
-	healthEvents *platformconnector.HealthEvents,
+	healthEvents *protos.HealthEvents,
 ) error {
 	// Get the health event store interface
 	healthEventStore := r.dataStore.HealthEventStore()

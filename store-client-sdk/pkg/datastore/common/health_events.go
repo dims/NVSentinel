@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 )
 
@@ -199,7 +199,7 @@ func findHealthEventInDocument(document map[string]interface{}) map[string]inter
 }
 
 // createProtobufHealthEvent creates protobuf from health event map
-func createProtobufHealthEvent(healthEventMap map[string]interface{}) (*platformconnectorprotos.HealthEvent, error) {
+func createProtobufHealthEvent(healthEventMap map[string]interface{}) (*protos.HealthEvent, error) {
 	if len(healthEventMap) == 0 {
 		return nil, nil
 	}
@@ -209,7 +209,7 @@ func createProtobufHealthEvent(healthEventMap map[string]interface{}) (*platform
 		return nil, fmt.Errorf("%w: failed to marshal health event map: %w", ErrMarshalFailed, err)
 	}
 
-	var protoHealthEvent platformconnectorprotos.HealthEvent
+	var protoHealthEvent protos.HealthEvent
 	if err := json.Unmarshal(healthEventBytes, &protoHealthEvent); err != nil {
 		return nil, fmt.Errorf("%w: failed to unmarshal to protobuf HealthEvent: %w", ErrUnmarshalFailed, err)
 	}
@@ -219,10 +219,10 @@ func createProtobufHealthEvent(healthEventMap map[string]interface{}) (*platform
 
 // Protobuf Type Assertion Utilities
 
-// ExtractPlatformConnectorHealthEvent safely extracts a platformconnectorprotos.HealthEvent
+// ExtractPlatformConnectorHealthEvent safely extracts a protos.HealthEvent
 func ExtractPlatformConnectorHealthEvent(
 	hews *datastore.HealthEventWithStatus,
-) (*platformconnectorprotos.HealthEvent, error) {
+) (*protos.HealthEvent, error) {
 	if hews == nil {
 		return nil, fmt.Errorf("HealthEventWithStatus is nil")
 	}
@@ -231,19 +231,19 @@ func ExtractPlatformConnectorHealthEvent(
 		return nil, fmt.Errorf("HealthEvent field is nil")
 	}
 
-	healthEvent, ok := hews.HealthEvent.(*platformconnectorprotos.HealthEvent)
+	healthEvent, ok := hews.HealthEvent.(*protos.HealthEvent)
 	if !ok {
-		return nil, fmt.Errorf("%w: expected *platformconnectorprotos.HealthEvent, got %T",
+		return nil, fmt.Errorf("%w: expected *protos.HealthEvent, got %T",
 			ErrInvalidHealthEventType, hews.HealthEvent)
 	}
 
 	return healthEvent, nil
 }
 
-// ExtractPlatformConnectorsHealthEvent safely extracts a platformconnectorprotos.HealthEvent
+// ExtractPlatformConnectorsHealthEvent safely extracts a protos.HealthEvent
 // NOTE: This is the same as ExtractPlatformConnectorHealthEvent, kept for backward compatibility
 func ExtractPlatformConnectorsHealthEvent(
 	hews *datastore.HealthEventWithStatus,
-) (*platformconnectorprotos.HealthEvent, error) {
+) (*protos.HealthEvent, error) {
 	return ExtractPlatformConnectorHealthEvent(hews)
 }

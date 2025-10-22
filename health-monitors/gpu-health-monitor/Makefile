@@ -67,7 +67,7 @@ all: lint-test
 # =============================================================================
 
 # Override Go-based targets with Python equivalents
-lint-test:
+lint-test: clean
 	@echo "Linting and testing $(MODULE_NAME) (Python module)..."
 	$(TEST_SETUP_COMMANDS) \
 	poetry run black --check . && \
@@ -102,7 +102,7 @@ binary:
 clean:
 	@echo "Cleaning $(MODULE_NAME)..."
 	rm -f report.xml coverage.xml .coverage
-	rm -rf .pytest_cache
+	rm -rf .pytest_cache .venv
 	rm -rf $(CLEAN_EXTRA_FILES)
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete

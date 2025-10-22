@@ -17,44 +17,44 @@ package common
 import (
 	"testing"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestGetRemediationGroupForAction(t *testing.T) {
 	tests := []struct {
 		name          string
-		action        platformconnector.RecommenedAction
+		action        protos.RecommenedAction
 		expectedGroup string
 	}{
 		{
 			name:          "COMPONENT_RESET returns restart group",
-			action:        platformconnector.RecommenedAction_COMPONENT_RESET,
+			action:        protos.RecommenedAction_COMPONENT_RESET,
 			expectedGroup: "restart",
 		},
 		{
 			name:          "RESTART_VM returns restart group",
-			action:        platformconnector.RecommenedAction_RESTART_VM,
+			action:        protos.RecommenedAction_RESTART_VM,
 			expectedGroup: "restart",
 		},
 		{
 			name:          "RESTART_BM returns restart group",
-			action:        platformconnector.RecommenedAction_RESTART_BM,
+			action:        protos.RecommenedAction_RESTART_BM,
 			expectedGroup: "restart",
 		},
 		{
 			name:          "CONTACT_SUPPORT returns empty string (not in any group)",
-			action:        platformconnector.RecommenedAction_CONTACT_SUPPORT,
+			action:        protos.RecommenedAction_CONTACT_SUPPORT,
 			expectedGroup: "",
 		},
 		{
 			name:          "NONE returns empty string (not in any group)",
-			action:        platformconnector.RecommenedAction_NONE,
+			action:        protos.RecommenedAction_NONE,
 			expectedGroup: "",
 		},
 		{
 			name:          "UNKNOWN returns empty string (not in any group)",
-			action:        platformconnector.RecommenedAction_UNKNOWN,
+			action:        protos.RecommenedAction_UNKNOWN,
 			expectedGroup: "",
 		},
 	}
@@ -71,15 +71,15 @@ func TestGetActionsForGroup(t *testing.T) {
 	tests := []struct {
 		name            string
 		group           string
-		expectedActions []platformconnector.RecommenedAction
+		expectedActions []protos.RecommenedAction
 	}{
 		{
 			name:  "restart group returns all restart-related actions",
 			group: "restart",
-			expectedActions: []platformconnector.RecommenedAction{
-				platformconnector.RecommenedAction_COMPONENT_RESET,
-				platformconnector.RecommenedAction_RESTART_VM,
-				platformconnector.RecommenedAction_RESTART_BM,
+			expectedActions: []protos.RecommenedAction{
+				protos.RecommenedAction_COMPONENT_RESET,
+				protos.RecommenedAction_RESTART_VM,
+				protos.RecommenedAction_RESTART_BM,
 			},
 		},
 		{
@@ -109,49 +109,49 @@ func TestGetActionsForGroup(t *testing.T) {
 func TestIsActionInGroup(t *testing.T) {
 	tests := []struct {
 		name     string
-		action   platformconnector.RecommenedAction
+		action   protos.RecommenedAction
 		group    string
 		expected bool
 	}{
 		{
 			name:     "COMPONENT_RESET is in restart group",
-			action:   platformconnector.RecommenedAction_COMPONENT_RESET,
+			action:   protos.RecommenedAction_COMPONENT_RESET,
 			group:    "restart",
 			expected: true,
 		},
 		{
 			name:     "RESTART_VM is in restart group",
-			action:   platformconnector.RecommenedAction_RESTART_VM,
+			action:   protos.RecommenedAction_RESTART_VM,
 			group:    "restart",
 			expected: true,
 		},
 		{
 			name:     "RESTART_BM is in restart group",
-			action:   platformconnector.RecommenedAction_RESTART_BM,
+			action:   protos.RecommenedAction_RESTART_BM,
 			group:    "restart",
 			expected: true,
 		},
 		{
 			name:     "CONTACT_SUPPORT is not in restart group",
-			action:   platformconnector.RecommenedAction_CONTACT_SUPPORT,
+			action:   protos.RecommenedAction_CONTACT_SUPPORT,
 			group:    "restart",
 			expected: false,
 		},
 		{
 			name:     "NONE is not in restart group",
-			action:   platformconnector.RecommenedAction_NONE,
+			action:   protos.RecommenedAction_NONE,
 			group:    "restart",
 			expected: false,
 		},
 		{
 			name:     "RESTART_VM is not in non-existent group",
-			action:   platformconnector.RecommenedAction_RESTART_VM,
+			action:   protos.RecommenedAction_RESTART_VM,
 			group:    "non-existent",
 			expected: false,
 		},
 		{
 			name:     "any action in empty group returns false",
-			action:   platformconnector.RecommenedAction_RESTART_VM,
+			action:   protos.RecommenedAction_RESTART_VM,
 			group:    "",
 			expected: false,
 		},
@@ -187,7 +187,7 @@ func TestRemediationEquivalenceGroupsStructure(t *testing.T) {
 	assert.NotEmpty(t, restartGroup, "restart group should contain actions")
 
 	for groupName, actions := range RemediationEquivalenceGroups {
-		seen := make(map[platformconnector.RecommenedAction]bool)
+		seen := make(map[protos.RecommenedAction]bool)
 		for _, action := range actions {
 			assert.False(t, seen[action], "duplicate action %v found in group %s", action, groupName)
 			seen[action] = true

@@ -19,17 +19,24 @@ ARG IMG=nvcr.io/nvidia/distroless/go
 
 FROM public.ecr.aws/docker/library/golang:1.24-bullseye AS builder
 
-# TODO: remove when pushing to GitHub
 ENV CGO_ENABLED=0
 
-WORKDIR /go/src/simple-health-client
+WORKDIR /go/src
 
-COPY tilt/simple-health-client/go.mod tilt/simple-health-client/go.sum ./
+# Copy go modules and dependencies (based on go.mod replace directives)
+COPY tilt/simple-health-client/go.mod tilt/simple-health-client/go.sum ./tilt/simple-health-client/
+COPY data-models/go.mod data-models/go.sum ./data-models/
+
+# Copy dependency source code
+COPY data-models/ ./data-models/
+
+# Copy main module source
+COPY tilt/simple-health-client/ ./tilt/simple-health-client/
+
+WORKDIR /go/src/tilt/simple-health-client
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
-
-COPY tilt/simple-health-client/ .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -o simple-health-client main.go
@@ -38,6 +45,6 @@ FROM ${IMG}:${TAG}
 
 WORKDIR /app
 
-COPY --from=builder /go/src/simple-health-client/simple-health-client .
+COPY --from=builder /go/src/tilt/simple-health-client/simple-health-client .
 
 ENTRYPOINT ["/app/simple-health-client"]

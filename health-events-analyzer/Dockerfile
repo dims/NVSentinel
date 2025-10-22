@@ -25,17 +25,14 @@ ENV CGO_ENABLED=0
 
 WORKDIR /go/src
 
-# Copy go modules and dependencies
+# Copy go modules and dependencies (based on go.mod replace directives)
 COPY health-events-analyzer/go.mod health-events-analyzer/go.sum ./health-events-analyzer/
 COPY store-client-sdk/go.mod store-client-sdk/go.sum ./store-client-sdk/
-COPY platform-connectors/go.mod platform-connectors/go.sum ./platform-connectors/
-COPY health-monitors/csp-health-monitor/go.mod health-monitors/csp-health-monitor/go.sum ./health-monitors/csp-health-monitor/
-COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum ./health-monitors/syslog-health-monitor/
+COPY data-models/go.mod data-models/go.sum data-models/
 
 # Copy dependency source code
 COPY store-client-sdk/ ./store-client-sdk/
-COPY platform-connectors/ ./platform-connectors/
-COPY health-monitors/ ./health-monitors/
+COPY data-models/ ./data-models/
 
 # Copy main module source
 COPY health-events-analyzer/ ./health-events-analyzer/

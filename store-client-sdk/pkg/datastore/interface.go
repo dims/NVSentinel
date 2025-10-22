@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 )
 
 // Status represents operation status

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dcgm_structs, dcgm_errors, dcgm_fields, dcgmvalue, pydcgm, bisect
 import logging as log
 from . import types, metrics
 from threading import Event
@@ -22,6 +21,27 @@ from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import time
 import os
+import bisect
+
+# Try to import DCGM modules, fall back to mocks for testing
+try:
+    import dcgm_structs, dcgm_errors, dcgm_fields, dcgmvalue, pydcgm
+except ImportError:
+    # This will be the case during testing when DCGM is not available
+    import sys
+
+    if any("pytest" in arg for arg in sys.argv) or "PYTEST_CURRENT_TEST" in os.environ:
+        # We're in a test environment, modules should be mocked by conftest.py
+        try:
+            import dcgm_structs, dcgm_errors, dcgm_fields, dcgmvalue, pydcgm
+        except ImportError:
+            # Fallback if conftest.py hasn't run yet
+            log.warning("DCGM modules not available and not in test environment")
+            dcgm_structs = dcgm_errors = dcgm_fields = dcgmvalue = pydcgm = None
+    else:
+        # Production environment but DCGM not available
+        log.error("DCGM modules not available. Please ensure DCGM is properly installed.")
+        raise
 
 
 DELAY, MULTIPLIER, MAX_DELAY = 2, 1.5, 120

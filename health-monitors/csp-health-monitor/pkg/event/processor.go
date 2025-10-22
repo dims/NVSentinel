@@ -22,8 +22,8 @@ import (
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 	klog "k8s.io/klog/v2"
 )
 

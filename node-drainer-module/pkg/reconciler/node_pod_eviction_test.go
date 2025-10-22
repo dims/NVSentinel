@@ -26,7 +26,7 @@ import (
 	"github.com/nvidia/nvsentinel/statemanager"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
-	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platform_connectors "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"

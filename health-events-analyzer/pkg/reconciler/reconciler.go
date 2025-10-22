@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
-	platform_connectors "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 
 	// Datastore abstraction
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
@@ -159,20 +159,20 @@ func (r *Reconciler) handleEvent(ctx context.Context, event *datastore.HealthEve
 		if matchesAnySequenceCriteria(rule, *event) && r.evaluateRule(ctx, rule, *event) {
 			klog.Infof("Rule '%s' matched for event: %+v", rule.Name, event)
 
-			actionVal, ok := platform_connectors.RecommenedAction_value[rule.RecommendedAction]
+			actionVal, ok := protos.RecommenedAction_value[rule.RecommendedAction]
 			if !ok {
-				actionVal = int32(platform_connectors.RecommenedAction_NONE)
+				actionVal = int32(protos.RecommenedAction_NONE)
 
 				klog.Warningf("Invalid recommended_action '%s' in rule '%s'; defaulting to NONE", rule.RecommendedAction, rule.Name)
 			}
 
 			// Type assert the HealthEvent for the Publisher
-			publishHealthEvent, ok := event.HealthEvent.(*platform_connectors.HealthEvent)
+			publishHealthEvent, ok := event.HealthEvent.(*protos.HealthEvent)
 			if !ok {
-				return false, fmt.Errorf("expected *platform_connectors.HealthEvent for publishing, got %T", event.HealthEvent)
+				return false, fmt.Errorf("expected *protos.HealthEvent for publishing, got %T", event.HealthEvent)
 			}
 
-			err := r.config.Publisher.Publish(ctx, publishHealthEvent, platform_connectors.RecommenedAction(actionVal))
+			err := r.config.Publisher.Publish(ctx, publishHealthEvent, protos.RecommenedAction(actionVal))
 			if err != nil {
 				klog.Errorf("Error in publishing the new fatal event: %+v", err)
 				publisher.FatalEventPublishingError.WithLabelValues("event_publishing_to_UDS_error").Inc()
@@ -213,7 +213,7 @@ func matchesAnySequenceCriteria(
 }
 
 // matchesSequenceCriteria checks if the current event matches a specific sequence criteria
-func matchesSequenceCriteria(criteria map[string]interface{}, event *platform_connectors.HealthEvent) bool {
+func matchesSequenceCriteria(criteria map[string]interface{}, event *protos.HealthEvent) bool {
 	for key, value := range criteria {
 		strValue, ok := value.(string)
 		if ok && len(strValue) > 5 && strValue[:5] == "this." {
@@ -232,7 +232,7 @@ func matchesSequenceCriteria(criteria map[string]interface{}, event *platform_co
 // getValueFromPath extracts a value from the event using a dot-notation path
 //
 //nolint:cyclop,gocognit // TODO: refactor to reduce complexity
-func getValueFromPath(path string, event *platform_connectors.HealthEvent) interface{} {
+func getValueFromPath(path string, event *protos.HealthEvent) interface{} {
 	parts := strings.Split(path, ".")
 
 	if len(parts) > 0 && parts[0] == "healthevent" {
@@ -368,7 +368,7 @@ func (r *Reconciler) evaluateRule(
 func (r *Reconciler) buildFilterFromSequenceCriteria(
 	criteria map[string]interface{},
 	timeWindow time.Duration,
-	healthEvent *platform_connectors.HealthEvent,
+	healthEvent *protos.HealthEvent,
 ) (map[string]interface{}, error) {
 	filter := make(map[string]interface{})
 

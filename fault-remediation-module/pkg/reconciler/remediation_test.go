@@ -19,7 +19,7 @@ import (
 	"testing"
 	"text/template"
 
-	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -256,7 +256,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 		name              string
 		nodeName          string
 		dryRun            bool
-		recommendedAction platformconnectorprotos.RecommenedAction
+		recommendedAction protos.RecommenedAction
 		shouldSucceed     bool
 		expectedError     bool
 		shouldCreate      bool
@@ -265,7 +265,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 			name:              "Successful rebootnode creation",
 			nodeName:          "test-node-1",
 			dryRun:            false,
-			recommendedAction: platformconnectorprotos.RecommenedAction_RESTART_VM,
+			recommendedAction: protos.RecommenedAction_RESTART_VM,
 			shouldSucceed:     true,
 			expectedError:     false,
 			shouldCreate:      true,
@@ -274,7 +274,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 			name:              "Skip rebootnode creation with dry run",
 			nodeName:          "test-node-2",
 			dryRun:            true,
-			recommendedAction: platformconnectorprotos.RecommenedAction_RESTART_VM,
+			recommendedAction: protos.RecommenedAction_RESTART_VM,
 			shouldSucceed:     true,
 			expectedError:     false,
 			shouldCreate:      false,
@@ -336,7 +336,7 @@ spec:
 			healthEventDoc := &HealthEventDoc{
 				ID: "test-health-event-id",
 				HealthEventWithStatus: datastore.HealthEventWithStatus{
-					HealthEvent: &platformconnectorprotos.HealthEvent{
+					HealthEvent: &protos.HealthEvent{
 						NodeName:          tt.nodeName,
 						RecommendedAction: tt.recommendedAction,
 					},

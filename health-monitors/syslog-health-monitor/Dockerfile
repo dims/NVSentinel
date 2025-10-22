@@ -20,9 +20,15 @@ WORKDIR /go/src/nvsentinel
 # Copy the go.mod files for dependencies first
 COPY health-monitors/syslog-health-monitor/go.mod health-monitors/syslog-health-monitor/go.sum health-monitors/syslog-health-monitor/
 
+# Copy local module dependencies go.mod files (based on go.mod replace directives)
+COPY data-models/go.mod data-models/go.sum data-models/
+
 # Download dependencies
 RUN --mount=type=cache,target=/go/pkg/mod \
     cd health-monitors/syslog-health-monitor && go mod download
+
+# Copy local module source code
+COPY data-models/ data-models/
 
 # Copy the source code
 COPY health-monitors/syslog-health-monitor/ health-monitors/syslog-health-monitor/
