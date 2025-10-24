@@ -343,6 +343,12 @@ jobs:
 
           echo "✅ Coverage report generated successfully"
 
+          # Check if coverage report indicates no change to avoid spam
+          if grep -q "will \*\*not change\*\* overall coverage" coverage-report.md; then
+            echo "ℹ️  Coverage report shows no change - skipping PR comment to reduce noise"
+            exit 0
+          fi
+
           # Post comment using our correct PR number
           if [[ -n "${{ steps.pr-number.outputs.pr_number }}" ]]; then
             echo "Posting coverage comment to PR #${{ steps.pr-number.outputs.pr_number }}..."
