@@ -319,7 +319,7 @@ jobs:
 
           # Generate the report using fgrosse's CLI tool (same format!)
           echo "Generating coverage report..."
-          if ! go-coverage-report -root=github.com/NVIDIA/nvsentinel \
+          if ! go-coverage-report -root=github.com/nvidia/nvsentinel \
             .github/outputs/old-coverage.txt \
             .github/outputs/new-coverage.txt \
             .github/outputs/all_modified_files.json > coverage-report.md 2> coverage-report.err; then
