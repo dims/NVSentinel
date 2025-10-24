@@ -28,6 +28,7 @@ PROTOBUF_VERSION := v27.1
 PROTOC_GEN_GO_VERSION := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.3.0
 GRPCIO_TOOLS_VERSION := 1.75.1
+BLACK_VERSION:= '25.9.0'
 SHELLCHECK_VERSION := v0.11.0
 ADDLICENSE_VERSION := latest
 DOCKER_BUILDX_VERSION := latest
@@ -47,6 +48,7 @@ PROTOBUF_VERSION := $(shell $(YQ) '.protobuf.protobuf' .versions.yaml)
 PROTOC_GEN_GO_GRPC_VERSION := $(shell $(YQ) '.protobuf.protoc_gen_go_grpc' .versions.yaml)
 PROTOC_GEN_GO_VERSION := $(shell $(YQ) '.protobuf.protoc_gen_go' .versions.yaml)
 PYTHON_VERSION := $(shell $(YQ) '.languages.python' .versions.yaml)
+BLACK_VERSION := $(shell $(YQ) '.linting.black' .versions.yaml)
 SHELLCHECK_VERSION := $(shell $(YQ) '.linting.shellcheck' .versions.yaml)
 endif
 
@@ -112,6 +114,7 @@ show-versions: ## Display all tool versions loaded from .versions.yaml
 	@echo "  grpcio-tools:           $(GRPCIO_TOOLS_VERSION)"
 	@echo ""
 	@echo "Linting:"
+	@echo "  black:                  $(BLACK_VERSION)"
 	@echo "  shellcheck:             $(SHELLCHECK_VERSION)"
 	@echo "  addlicense:             $(ADDLICENSE_VERSION)"
 	@echo ""
