@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
+	platform_connectors "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
-	platform_connectors "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
 	// Generic datastore interfaces (no MongoDB dependencies)
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"

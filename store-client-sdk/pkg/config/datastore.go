@@ -53,6 +53,8 @@ func LoadDatastoreConfig() (*datastore.DataStoreConfig, error) {
 		switch config.Provider {
 		case datastore.ProviderMongoDB:
 			config.Connection.Port = getEnvIntWithDefault("DATASTORE_PORT", 27017)
+		case datastore.ProviderPostgreSQL:
+			config.Connection.Port = getEnvIntWithDefault("DATASTORE_PORT", 5432)
 		default:
 			if portStr := os.Getenv("DATASTORE_PORT"); portStr != "" {
 				if port, err := strconv.Atoi(portStr); err == nil {

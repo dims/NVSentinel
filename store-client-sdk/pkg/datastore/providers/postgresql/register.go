@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package csp
+package postgresql
 
 import (
 	"context"
 
-	"github.com/nvidia/nvsentinel/data-models/pkg/model"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	"k8s.io/klog/v2"
 )
 
-// Monitor defines the methods a CSP client must implement.
-type Monitor interface {
-	// StartMonitoring initiates the process of watching for maintenance events.
-	// It takes a context for cancellation and a channel to send normalized events.
-	StartMonitoring(ctx context.Context, eventChan chan<- model.MaintenanceEvent) error
+// init automatically registers the PostgreSQL provider
+func init() {
+	klog.V(2).Infof("Registering PostgreSQL datastore provider")
+	datastore.RegisterProvider(datastore.ProviderPostgreSQL, NewPostgreSQLDataStore)
+}
 
-	// GetName returns the name of the CSP (e.g., "gcp", "aws").
-	GetName() model.CSP
+// NewPostgreSQLProvider creates a new PostgreSQL datastore provider (explicit function)
+func NewPostgreSQLProvider(ctx context.Context, config datastore.DataStoreConfig) (datastore.DataStore, error) {
+	return NewPostgreSQLDataStore(ctx, config)
 }

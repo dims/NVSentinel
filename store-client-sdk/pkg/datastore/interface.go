@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 )
 
 // Status represents operation status
@@ -63,7 +63,8 @@ type HealthEventWithStatus struct {
 type DataStoreProvider string
 
 const (
-	ProviderMongoDB DataStoreProvider = "mongodb"
+	ProviderMongoDB    DataStoreProvider = "mongodb"
+	ProviderPostgreSQL DataStoreProvider = "postgresql"
 )
 
 // DataStoreConfig holds configuration for any datastore provider

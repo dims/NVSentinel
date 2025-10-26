@@ -17,7 +17,7 @@ require (
 
 require (
 	github.com/kr/text v0.2.0 // indirect
-	github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor v0.0.0 // indirect
+	github.com/lib/pq v1.10.9 // indirect
 	go.mongodb.org/mongo-driver v1.17.4 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

@@ -389,6 +389,15 @@ go-mod-tidy-all: ## Run go mod tidy in all directories with go.mod files
 	done
 	@echo "go mod tidy completed in all modules"
 
+# Lint all Go modules
+.PHONY: go-lint-all
+go-lint-all:
+	@echo "Running lint and tests for non-health-monitor Go modules..."
+	@for module in $(shell echo "$(GO_MODULES)" | tr ' ' '\n'); do \
+		echo "Processing $$module..."; \
+		$(MAKE) -C $$module lint || exit 1; \
+	done
+
 # Lint and test non-health-monitor Go modules
 .PHONY: go-lint-test-all
 go-lint-test-all:

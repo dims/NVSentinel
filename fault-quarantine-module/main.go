@@ -52,15 +52,18 @@ func getEnvWithDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
+
 	return defaultValue
 }
 
 // loadMetricUpdateInterval loads the metric update interval from environment
 func loadMetricUpdateInterval() (int, error) {
-	unprocessedEventsMetricUpdateIntervalSeconds, err := getEnvAsInt("UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS", 25)
+	unprocessedEventsMetricUpdateIntervalSeconds, err := getEnvAsInt(
+		"UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS", 25)
 	if err != nil {
 		return 0, fmt.Errorf("invalid UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: %w", err)
 	}
+
 	return unprocessedEventsMetricUpdateIntervalSeconds, nil
 }
 
@@ -109,7 +112,6 @@ func parseFlags() (metricsPort, kubeconfigPath *string, dryRun, circuitBreakerEn
 
 	return
 }
-
 
 // createUnremediatedEventsPipeline creates a database-agnostic aggregation pipeline that filters
 // change stream events to only include INSERT operations.
@@ -237,4 +239,3 @@ func run() error {
 
 	return nil
 }
-

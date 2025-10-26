@@ -21,10 +21,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
 
 	"cloud.google.com/go/logging"

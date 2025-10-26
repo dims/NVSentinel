@@ -54,6 +54,8 @@ func LoadDatastoreConfig() (*datastore.DataStoreConfig, error) {
 	// Set default ports based on provider
 	if config.Provider == datastore.ProviderMongoDB {
 		config.Connection.Port = getEnvIntWithDefault("DATASTORE_PORT", 27017)
+	} else if config.Provider == datastore.ProviderPostgreSQL {
+		config.Connection.Port = getEnvIntWithDefault("DATASTORE_PORT", 5432)
 	}
 
 	return config, nil

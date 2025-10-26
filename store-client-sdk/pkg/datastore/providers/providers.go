@@ -18,4 +18,5 @@ package providers
 import (
 	// Import all providers to ensure their init() functions run and register themselves
 	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers/mongodb"
+	_ "github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/providers/postgresql"
 )

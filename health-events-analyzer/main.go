@@ -20,10 +20,10 @@ import (
 	"net/http"
 	"os"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/reconciler"
-	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
 	// Datastore abstraction
 	sdkconfig "github.com/nvidia/nvsentinel/store-client-sdk/pkg/config"

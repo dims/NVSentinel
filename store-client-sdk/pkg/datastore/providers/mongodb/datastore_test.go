@@ -20,9 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/datastore/common"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -85,19 +86,8 @@ func (s *MongoDBTestSuite) TestMaintenanceEventOperations() {
 
 	store := s.datastore.MaintenanceEventStore()
 
-	// Create test event
-	event := &model.MaintenanceEvent{
-		EventID:                "test-event-1",
-		CSP:                    model.CSPAWS,
-		ClusterName:            "test-cluster",
-		NodeName:               "test-node-1",
-		Status:                 model.StatusDetected,
-		CSPStatus:              model.CSPStatusPending,
-		MaintenanceType:        model.TypeScheduled,
-		EventReceivedTimestamp: time.Now().UTC(),
-		LastUpdatedTimestamp:   time.Now().UTC(),
-		Metadata:               map[string]string{"test": "value"},
-	}
+	// Create test event using the helper function to avoid import conflicts
+	event := common.CreateTestMaintenanceEvent("test-event-1", "test-node-1")
 
 	// Test upsert (insert)
 	err := store.UpsertMaintenanceEvent(s.ctx, event)
