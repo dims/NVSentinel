@@ -129,7 +129,7 @@ spec:
             {{- end }}
           envFrom:
             - configMapRef:
-                name: {{ if .Values.global.datastore }}{{ .Release.Name }}-datastore-config{{ else }}mongodb-config{{ end }}
+                name: {{ if and .Values.global.datastore (ne .Values.global.datastore.provider "mongodb") }}{{ .Release.Name }}-datastore-config{{ else }}mongodb-config{{ end }}
                 optional: true
       volumes:
       - name: config-volume

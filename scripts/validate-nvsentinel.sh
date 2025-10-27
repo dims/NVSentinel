@@ -157,7 +157,7 @@ for secret in "${secrets[@]}"; do
             warn "$secret: present but wrong type ($secret_type)"
         fi
     else
-        error "$secret not found"
+        warn "$secret not found"
     fi
 done
 

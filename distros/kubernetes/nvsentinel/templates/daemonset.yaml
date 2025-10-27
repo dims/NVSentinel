@@ -96,7 +96,7 @@ spec:
               value: {{ .Values.platformConnector.mongodbStore.clientCertMountPath }}
           envFrom:
             - configMapRef:
-                name: {{ if .Values.global.datastore }}{{ include "nvsentinel.fullname" . }}-datastore-config{{ else }}mongodb-config{{ end }}
+                name: {{ if and .Values.global.datastore (ne .Values.global.datastore.provider "mongodb") }}{{ include "nvsentinel.fullname" . }}-datastore-config{{ else }}mongodb-config{{ end }}
                 optional: true
       volumes:
         - name: var-run-vol

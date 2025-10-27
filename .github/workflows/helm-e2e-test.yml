@@ -288,7 +288,7 @@ jobs:
           max_attempts=$((${{ env.VALIDATION_TIMEOUT_MINUTES }} * 60 / ${{ env.VALIDATION_INTERVAL_SECONDS }}))
 
           for attempt in $(seq 1 $max_attempts); do
-            if ./scripts/validate-nvsentinel.sh --version "${SAFE_REF_NAME}" --namespace "${{ env.NVSENTINEL_NAMESPACE }}" --image-pattern "localhost/nvsentinel-e2e/nvsentinel" --verbose; then
+            if ./scripts/validate-nvsentinel.sh --version "${SAFE_REF_NAME}" --namespace "${{ env.NVSENTINEL_NAMESPACE }}" --verbose; then
               echo "Validation passed on attempt $attempt"
               exit 0
             fi
@@ -317,7 +317,7 @@ jobs:
           kubectl get events --all-namespaces --sort-by='.lastTimestamp' > /tmp/debug-artifacts/all-events.yaml || true
           kubectl get pods -n ${{ env.NVSENTINEL_NAMESPACE }} -o yaml > /tmp/debug-artifacts/nvsentinel-pods.yaml || true
           kubectl logs -n ${{ env.NVSENTINEL_NAMESPACE }} --all-containers=true --tail=500 > /tmp/debug-artifacts/nvsentinel-logs.txt || true
-          ./scripts/validate-nvsentinel.sh --version "${SAFE_REF_NAME}" --namespace "${{ env.NVSENTINEL_NAMESPACE }}" --image-pattern "localhost/nvsentinel-e2e/nvsentinel" --verbose > /tmp/debug-artifacts/validation-output.txt 2>&1 || true
+          ./scripts/validate-nvsentinel.sh --version "${SAFE_REF_NAME}" --namespace "${{ env.NVSENTINEL_NAMESPACE }}" --verbose > /tmp/debug-artifacts/validation-output.txt 2>&1 || true
           docker images > /tmp/debug-artifacts/docker-images.txt
           df -h > /tmp/debug-artifacts/disk-usage.txt
 

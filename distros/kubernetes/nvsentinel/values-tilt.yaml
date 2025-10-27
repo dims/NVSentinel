@@ -20,7 +20,7 @@ global:
   datastore:
     provider: "mongodb"  # Default to MongoDB for backward compatibility
     connection:
-      host: "mongodb"
+      # host is now dynamically determined by nvsentinel.mongodb.serviceName helper
       port: 27017
       database: "nvsentinel"
     options:

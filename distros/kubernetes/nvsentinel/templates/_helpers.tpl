@@ -60,3 +60,30 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Dynamically determine MongoDB service name based on architecture.
+This mirrors the logic from the MongoDB chart's mongodb.service.nameOverride helper.
+*/}}
+{{- define "nvsentinel.mongodb.serviceName" -}}
+{{- if and .Values.global.datastore (eq .Values.global.datastore.provider "mongodb") }}
+{{- $mongodbStore := index .Values "mongodb-store" }}
+{{- if and $mongodbStore $mongodbStore.mongodb }}
+{{- $mongodb := $mongodbStore.mongodb }}
+{{- if and $mongodb.service $mongodb.service.nameOverride }}
+{{- print $mongodb.service.nameOverride }}
+{{- else }}
+{{- $fullname := printf "%s-mongodb" (include "nvsentinel.fullname" .) }}
+{{- if eq ($mongodb.architecture | default "standalone") "replicaset" }}
+{{- printf "%s-headless" $fullname }}
+{{- else }}
+{{- printf "%s" $fullname }}
+{{- end }}
+{{- end }}
+{{- else }}
+{{- printf "%s-mongodb" (include "nvsentinel.fullname" .) }}
+{{- end }}
+{{- else }}
+{{- .Values.global.datastore.connection.host }}
+{{- end }}
+{{- end }}
