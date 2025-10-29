@@ -1,0 +1,147 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Go Vulnerability Check
+
+on:
+  # Run on push to main branch or when tags are created
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/headers/**'
+    tags:
+      - 'v*'
+  # Allow manual trigger
+  workflow_dispatch:
+  # Run daily at 6 AM UTC
+  schedule:
+    - cron: '0 6 * * *'
+  # Run when "/test govulncheck" is commented on a PR by NVIDIA org members
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  # Check if this is a valid PR comment trigger
+  check-comment:
+    runs-on: linux-amd64-cpu32
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run || steps.default.outputs.should-run || 'false' }}
+      pr-ref: ${{ steps.check.outputs.pr-ref || steps.default.outputs.pr-ref || '' }}
+    steps:
+      - name: Check comment and org membership
+        id: check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        if: github.event_name == 'issue_comment' && github.event.issue.pull_request
+        with:
+          script: |
+            const comment = context.payload.comment.body.trim();
+            const commenter = context.payload.comment.user.login;
+
+            // Check if comment is "/test govulncheck"
+            if (comment !== '/test govulncheck') {
+              console.log('Comment is not "/test govulncheck", skipping');
+              core.setOutput('should-run', 'false');
+              return;
+            }
+
+            // Check if commenter is a member of NVIDIA org
+            try {
+              await github.rest.orgs.checkMembershipForUser({
+                org: 'NVIDIA',
+                username: commenter,
+              });
+              console.log(`${commenter} is a member of NVIDIA org`);
+
+              // Get PR ref
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.issue.number,
+              });
+
+              core.setOutput('should-run', 'true');
+              core.setOutput('pr-ref', pr.data.head.sha);
+
+              // Add a reaction to acknowledge the command
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: '+1'
+              });
+            } catch (error) {
+              console.log(`${commenter} is not a member of NVIDIA org or membership is private`);
+              core.setOutput('should-run', 'false');
+            }
+
+      - name: Set default outputs for non-comment triggers
+        id: default
+        if: github.event_name != 'issue_comment'
+        run: |
+          echo "should-run=false" >> $GITHUB_OUTPUT
+          echo "pr-ref=" >> $GITHUB_OUTPUT
+
+  govulncheck:
+    runs-on: linux-amd64-cpu32
+    timeout-minutes: 30
+    # Run on schedule/push/workflow_dispatch, or if comment check passed
+    if: |
+      github.event_name != 'issue_comment' ||
+      (needs.check-comment.result == 'success' && needs.check-comment.outputs.should-run == 'true')
+    needs: [check-comment]
+    # Allow job to run even if check-comment is skipped
+    continue-on-error: false
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Determine checkout ref
+        id: checkout-ref
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "ref=${{ needs.check-comment.outputs.pr-ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version: 'stable'
+
+      - name: Install dependencies
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run govulncheck on all Go modules
+        run: ./scripts/govulncheck-all.sh

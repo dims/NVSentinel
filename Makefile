@@ -370,6 +370,17 @@ go-mod-tidy-all: ## Run go mod tidy in all directories with go.mod files
 	done
 	@echo "go mod tidy completed in all modules"
 
+# Run vulnerability checks on all Go modules
+.PHONY: govulncheck
+govulncheck: ## Check for security vulnerabilities in all Go modules
+	@echo "Running vulnerability checks on all Go modules..."
+	./scripts/govulncheck-all.sh
+
+.PHONY: govulncheck-strict
+govulncheck-strict: ## Check for vulnerabilities (fail on any, including non-actionable)
+	@echo "Running strict vulnerability checks on all Go modules..."
+	./scripts/govulncheck-all.sh --fail-on-any
+
 # Lint and test non-health-monitor Go modules
 .PHONY: go-lint-test-all
 go-lint-test-all:
