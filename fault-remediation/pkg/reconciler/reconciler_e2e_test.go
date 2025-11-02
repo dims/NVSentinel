@@ -29,17 +29,13 @@ import (
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/config"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/crstatus"
-	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -51,6 +47,102 @@ import (
 	"k8s.io/client-go/restmapper"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
+
+// MockChangeStreamWatcher provides a mock implementation of datastore.ChangeStreamWatcher for testing
+type MockChangeStreamWatcher struct {
+	EventsChan         chan datastore.EventWithToken
+	markProcessedCount int
+}
+
+// NewMockChangeStreamWatcher creates a new mock change stream watcher
+func NewMockChangeStreamWatcher() *MockChangeStreamWatcher {
+	return &MockChangeStreamWatcher{
+		EventsChan: make(chan datastore.EventWithToken, 10),
+	}
+}
+
+// Events returns the read-only events channel
+func (m *MockChangeStreamWatcher) Events() <-chan datastore.EventWithToken {
+	return m.EventsChan
+}
+
+// Start starts the change stream watcher (no-op for tests)
+func (m *MockChangeStreamWatcher) Start(ctx context.Context) {
+	// No-op for tests
+}
+
+// MarkProcessed marks an event as processed (no-op for tests)
+func (m *MockChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
+	m.markProcessedCount++
+	return nil
+}
+
+// Close closes the change stream watcher
+func (m *MockChangeStreamWatcher) Close(ctx context.Context) error {
+	close(m.EventsChan)
+	return nil
+}
+
+// GetCallCounts returns the call counts for various methods (for testing purposes)
+func (m *MockChangeStreamWatcher) GetCallCounts() (int, int, int, int) {
+	// Return counts for: start, markProcessed, close, getUnprocessed
+	// For simplicity, only tracking markProcessed
+	return 0, m.markProcessedCount, 0, 0
+}
+
+// MockHealthEventStore provides a mock implementation of datastore.HealthEventStore for testing
+type MockHealthEventStore struct {
+	UpdateHealthEventStatusFn func(ctx context.Context, id string, status datastore.HealthEventStatus) error
+}
+
+// UpdateHealthEventStatus updates a health event status (mock implementation)
+func (m *MockHealthEventStore) UpdateHealthEventStatus(ctx context.Context, id string, status datastore.HealthEventStatus) error {
+	if m.UpdateHealthEventStatusFn != nil {
+		return m.UpdateHealthEventStatusFn(ctx, id, status)
+	}
+	return nil
+}
+
+// Implement other required methods with no-op for testing
+func (m *MockHealthEventStore) InsertHealthEvents(ctx context.Context, events *datastore.HealthEventWithStatus) error {
+	return nil
+}
+
+func (m *MockHealthEventStore) UpdateHealthEventStatusByNode(ctx context.Context, nodeName string, status datastore.HealthEventStatus) error {
+	return nil
+}
+
+func (m *MockHealthEventStore) FindHealthEventsByNode(ctx context.Context, nodeName string) ([]datastore.HealthEventWithStatus, error) {
+	return nil, nil
+}
+
+func (m *MockHealthEventStore) FindHealthEventsByFilter(ctx context.Context, filter map[string]interface{}) ([]datastore.HealthEventWithStatus, error) {
+	return nil, nil
+}
+
+func (m *MockHealthEventStore) FindHealthEventsByStatus(ctx context.Context, status datastore.Status) ([]datastore.HealthEventWithStatus, error) {
+	return nil, nil
+}
+
+func (m *MockHealthEventStore) UpdateNodeQuarantineStatus(ctx context.Context, eventID string, status datastore.Status) error {
+	return nil
+}
+
+func (m *MockHealthEventStore) UpdatePodEvictionStatus(ctx context.Context, eventID string, status datastore.OperationStatus) error {
+	return nil
+}
+
+func (m *MockHealthEventStore) UpdateRemediationStatus(ctx context.Context, eventID string, status interface{}) error {
+	return nil
+}
+
+func (m *MockHealthEventStore) CheckIfNodeAlreadyDrained(ctx context.Context, nodeName string) (bool, error) {
+	return false, nil
+}
+
+func (m *MockHealthEventStore) FindLatestEventForNode(ctx context.Context, nodeName string) (*datastore.HealthEventWithStatus, error) {
+	return nil, nil
+}
 
 var (
 	testClient     *kubernetes.Clientset
@@ -190,10 +282,10 @@ func createTestRemediationClient(t *testing.T, dryRun bool) *FaultRemediationCli
 func TestCRBasedDeduplication_Integration(t *testing.T) {
 	ctx := testContext
 
-	nodeName := "test-node-dedup-" + primitive.NewObjectID().Hex()[:8]
+	nodeName := "test-node-dedup-" + "test-node-123"
 	createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
 	defer func() {
-		testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
 	}()
 
 	t.Run("FirstEvent_CreatesAnnotation", func(t *testing.T) {
@@ -211,7 +303,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 
 		// Process Event 1
 		healthEventDoc := &HealthEventDoc{
-			ID: primitive.NewObjectID(),
+			ID: "test-event-id-1",
 			HealthEventWithStatus: model.HealthEventWithStatus{
 				HealthEvent: &protos.HealthEvent{
 					NodeName:          nodeName,
@@ -247,7 +339,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 		assert.Equal(t, nodeName, cr.Object["spec"].(map[string]interface{})["nodeName"])
 
 		// Cleanup
-		testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
+		_ = testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
 	})
 
 	t.Run("SecondEvent_SkippedWhenCRInProgress", func(t *testing.T) {
@@ -265,7 +357,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 
 		// Event 1: Create first CR
 		event1 := &HealthEventDoc{
-			ID: primitive.NewObjectID(),
+			ID: "test-event-id-cr-1",
 			HealthEventWithStatus: model.HealthEventWithStatus{
 				HealthEvent: &protos.HealthEvent{
 					NodeName:          nodeName,
@@ -295,7 +387,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 			Version:  "v1alpha1",
 			Resource: "rebootnodes",
 		}
-		testDynamic.Resource(gvr).Delete(ctx, firstCRName, metav1.DeleteOptions{})
+		_ = testDynamic.Resource(gvr).Delete(ctx, firstCRName, metav1.DeleteOptions{})
 	})
 
 	t.Run("FailedCR_CleansAnnotationAndAllowsRetry", func(t *testing.T) {
@@ -313,7 +405,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 
 		// Event 1: Create first CR
 		event1 := &HealthEventDoc{
-			ID: primitive.NewObjectID(),
+			ID: "test-event-id-cr-1",
 			HealthEventWithStatus: model.HealthEventWithStatus{
 				HealthEvent: &protos.HealthEvent{
 					NodeName:          nodeName,
@@ -338,7 +430,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 
 		// Event 2: Create retry CR
 		event2 := &HealthEventDoc{
-			ID: primitive.NewObjectID(),
+			ID: "test-event-id",
 			HealthEventWithStatus: model.HealthEventWithStatus{
 				HealthEvent: &protos.HealthEvent{
 					NodeName:          nodeName,
@@ -362,8 +454,8 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 			Version:  "v1alpha1",
 			Resource: "rebootnodes",
 		}
-		testDynamic.Resource(gvr).Delete(ctx, firstCRName, metav1.DeleteOptions{})
-		testDynamic.Resource(gvr).Delete(ctx, secondCRName, metav1.DeleteOptions{})
+		_ = testDynamic.Resource(gvr).Delete(ctx, firstCRName, metav1.DeleteOptions{})
+		_ = testDynamic.Resource(gvr).Delete(ctx, secondCRName, metav1.DeleteOptions{})
 	})
 
 	t.Run("CrossAction_SameGroupDeduplication", func(t *testing.T) {
@@ -381,7 +473,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 
 		// Event 1: COMPONENT_RESET
 		event1 := &HealthEventDoc{
-			ID: primitive.NewObjectID(),
+			ID: "test-event-id",
 			HealthEventWithStatus: model.HealthEventWithStatus{
 				HealthEvent: &protos.HealthEvent{
 					NodeName:          nodeName,
@@ -417,17 +509,17 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 			Version:  "v1alpha1",
 			Resource: "rebootnodes",
 		}
-		testDynamic.Resource(gvr).Delete(ctx, firstCRName, metav1.DeleteOptions{})
+		_ = testDynamic.Resource(gvr).Delete(ctx, firstCRName, metav1.DeleteOptions{})
 	})
 }
 
 func TestEventSequenceWithAnnotations_Integration(t *testing.T) {
 	ctx := testContext
 
-	nodeName := "test-node-sequence-" + primitive.NewObjectID().Hex()[:8]
+	nodeName := "test-node-sequence-" + "test-node-123"
 	createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
 	defer func() {
-		testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
 	}()
 
 	cleanupNodeAnnotations(ctx, t, nodeName)
@@ -450,7 +542,7 @@ func TestEventSequenceWithAnnotations_Integration(t *testing.T) {
 
 	// Event 1: RESTART_VM creates CR-1
 	event1 := &HealthEventDoc{
-		ID: primitive.NewObjectID(),
+		ID: "test-event-id",
 		HealthEventWithStatus: model.HealthEventWithStatus{
 			HealthEvent: &protos.HealthEvent{
 				NodeName:          nodeName,
@@ -512,7 +604,7 @@ func TestEventSequenceWithAnnotations_Integration(t *testing.T) {
 
 	// Event 5: Create retry CR
 	event5 := &HealthEventDoc{
-		ID: primitive.NewObjectID(),
+		ID: "test-event-id",
 		HealthEventWithStatus: model.HealthEventWithStatus{
 			HealthEvent: &protos.HealthEvent{
 				NodeName:          nodeName,
@@ -529,8 +621,8 @@ func TestEventSequenceWithAnnotations_Integration(t *testing.T) {
 	assert.Equal(t, crName2, state.EquivalenceGroups["restart"].MaintenanceCR)
 
 	// Cleanup
-	testDynamic.Resource(gvr).Delete(ctx, crName1, metav1.DeleteOptions{})
-	testDynamic.Resource(gvr).Delete(ctx, crName2, metav1.DeleteOptions{})
+	_ = testDynamic.Resource(gvr).Delete(ctx, crName1, metav1.DeleteOptions{})
+	_ = testDynamic.Resource(gvr).Delete(ctx, crName2, metav1.DeleteOptions{})
 }
 
 // TestFullReconcilerWithMockedMongoDB tests the entire reconciler flow
@@ -538,10 +630,10 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
 	defer cancel()
 
-	nodeName := "test-node-full-e2e-" + primitive.NewObjectID().Hex()[:8]
+	nodeName := "test-node-full-e2e-" + "test-node-123"
 	createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
 	defer func() {
-		testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
 	}()
 
 	cleanupNodeAnnotations(ctx, t, nodeName)
@@ -555,17 +647,17 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 	t.Run("CompleteFlow_WithEventLoop", func(t *testing.T) {
 		remediationClient := createTestRemediationClient(t, false)
 
-		// Create mock MongoDB collection
+		// Create mock health event store
 		updateCalled := 0
-		mockColl := &MockCollection{
-			updateOneFn: func(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
+		mockStore := &MockHealthEventStore{
+			UpdateHealthEventStatusFn: func(ctx context.Context, id string, status datastore.HealthEventStatus) error {
 				updateCalled++
-				return &mongo.UpdateResult{ModifiedCount: 1}, nil
+				return nil
 			},
 		}
 
 		// Create mock watcher with event channel
-		mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
+		mockWatcher := NewMockChangeStreamWatcher()
 
 		cfg := ReconcilerConfig{
 			RemediationClient: remediationClient,
@@ -587,14 +679,18 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 			slog.Info("Test: Listening for events on the channel...")
 			for event := range mockWatcher.Events() {
 				slog.Info("Test: Event received", "eventData", event)
-				reconcilerInstance.processEvent(ctx, event, mockWatcher, mockColl)
+				reconcilerInstance.processEvent(ctx, event, mockWatcher, mockStore)
 			}
 		}()
 
 		// Event 1: Send quarantine event through channel
-		eventID1 := primitive.NewObjectID()
+		eventID1 := "test-event-id-1"
 		event1 := createQuarantineEvent(eventID1, nodeName, protos.RecommendedAction_RESTART_BM)
-		mockWatcher.EventsChan <- event1
+		eventToken1 := datastore.EventWithToken{
+			Event:       map[string]interface{}(event1),
+			ResumeToken: []byte("test-token-1"),
+		}
+		mockWatcher.EventsChan <- eventToken1
 
 		// Wait for CR creation
 		var crName string
@@ -643,9 +739,13 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 		// Record MongoDB update count before sending duplicate event
 		updateCountBefore := updateCalled
 
-		eventID2 := primitive.NewObjectID()
+		eventID2 := "test-event-id-2"
 		event2 := createQuarantineEvent(eventID2, nodeName, protos.RecommendedAction_COMPONENT_RESET)
-		mockWatcher.EventsChan <- event2
+		eventToken2 := datastore.EventWithToken{
+			Event:       map[string]interface{}(event2),
+			ResumeToken: []byte("test-token-2"),
+		}
+		mockWatcher.EventsChan <- eventToken2
 
 		// Wait for event to be processed and verify deduplication
 		assert.Eventually(t, func() bool {
@@ -689,7 +789,11 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 
 		// Event 3: Send unquarantine event
 		unquarantineEvent := createUnquarantineEvent(nodeName)
-		mockWatcher.EventsChan <- unquarantineEvent
+		unquarantineEventToken := datastore.EventWithToken{
+			Event:       map[string]interface{}(unquarantineEvent),
+			ResumeToken: []byte("test-token-3"),
+		}
+		mockWatcher.EventsChan <- unquarantineEventToken
 
 		// Wait for annotation cleanup
 		assert.Eventually(t, func() bool {
@@ -737,7 +841,7 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 		assert.GreaterOrEqual(t, afterDuration, beforeDuration+3, "eventHandlingDuration should record observations for all events")
 
 		// Cleanup
-		testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
+		_ = testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
 	})
 
 	t.Run("UnsupportedAction_TrackedInMetrics", func(t *testing.T) {
@@ -770,18 +874,18 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 }
 
 // Helper to create quarantine event
-func createQuarantineEvent(eventID primitive.ObjectID, nodeName string, action protos.RecommendedAction) bson.M {
-	return bson.M{
+func createQuarantineEvent(eventID string, nodeName string, action protos.RecommendedAction) datastore.Event {
+	return datastore.Event{
 		"operationType": "update",
-		"fullDocument": bson.M{
+		"fullDocument": map[string]interface{}{
 			"_id": eventID,
-			"healtheventstatus": bson.M{
-				"userpodsevictionstatus": bson.M{
+			"healtheventstatus": map[string]interface{}{
+				"userpodsevictionstatus": map[string]interface{}{
 					"status": model.StatusSucceeded,
 				},
 				"nodequarantined": model.Quarantined,
 			},
-			"healthevent": bson.M{
+			"healthevent": map[string]interface{}{
 				"nodename":          nodeName,
 				"recommendedaction": int32(action),
 			},
@@ -790,18 +894,18 @@ func createQuarantineEvent(eventID primitive.ObjectID, nodeName string, action p
 }
 
 // Helper to create unquarantine event
-func createUnquarantineEvent(nodeName string) bson.M {
-	return bson.M{
+func createUnquarantineEvent(nodeName string) datastore.Event {
+	return datastore.Event{
 		"operationType": "update",
-		"fullDocument": bson.M{
-			"_id": primitive.NewObjectID(),
-			"healtheventstatus": bson.M{
+		"fullDocument": map[string]interface{}{
+			"_id": "test-doc-id",
+			"healtheventstatus": map[string]interface{}{
 				"nodequarantined": model.UnQuarantined,
-				"userpodsevictionstatus": bson.M{
+				"userpodsevictionstatus": map[string]interface{}{
 					"status": model.StatusSucceeded,
 				},
 			},
-			"healthevent": bson.M{
+			"healthevent": map[string]interface{}{
 				"nodename": nodeName,
 			},
 		},
@@ -924,14 +1028,17 @@ func TestMetrics_ProcessingErrors(t *testing.T) {
 
 	beforeError := getCounterVecValue(t, processingErrors, "unmarshal_doc_error", "unknown")
 
-	invalidEvent := bson.M{
-		"fullDocument": "invalid-data",
+	invalidEventToken := datastore.EventWithToken{
+		Event: map[string]interface{}{
+			"fullDocument": "invalid-data",
+		},
+		ResumeToken: []byte("test-token"),
 	}
 
-	mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
-	mockColl := &MockCollection{}
+	mockWatcher := NewMockChangeStreamWatcher()
+	mockStore := &MockHealthEventStore{}
 
-	reconciler.processEvent(testContext, invalidEvent, mockWatcher, mockColl)
+	reconciler.processEvent(testContext, invalidEventToken, mockWatcher, mockStore)
 
 	afterError := getCounterVecValue(t, processingErrors, "unmarshal_doc_error", "unknown")
 	assert.Greater(t, afterError, beforeError, "processingErrors should increment for unmarshal error")

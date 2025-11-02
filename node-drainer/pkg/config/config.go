@@ -21,10 +21,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
-	"github.com/nvidia/nvsentinel/data-models/pkg/model"
-	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/config"
 )
 
 type EvictMode string
@@ -111,28 +109,75 @@ func validateAndSetDefaults(config *TomlConfig) (*TomlConfig, error) {
 }
 
 type ReconcilerConfig struct {
-	TomlConfig    TomlConfig
-	MongoConfig   storewatcher.MongoDBConfig
-	TokenConfig   storewatcher.TokenConfig
-	MongoPipeline mongo.Pipeline
-	StateManager  statemanager.StateManager
+	TomlConfig     TomlConfig
+	DatabaseConfig config.DatabaseConfig
+	TokenConfig    client.TokenConfig
+	StateManager   statemanager.StateManager
 }
 
-// NewMongoPipeline creates the MongoDB change stream pipeline for watching quarantine events
-func NewMongoPipeline() mongo.Pipeline {
-	return mongo.Pipeline{
-		bson.D{
-			bson.E{Key: "$match", Value: bson.D{
-				bson.E{Key: "operationType", Value: "update"},
-				bson.E{Key: "$or", Value: bson.A{
-					bson.D{bson.E{Key: "updateDescription.updatedFields",
-						Value: bson.D{bson.E{Key: "healtheventstatus.nodequarantined", Value: model.Quarantined}}}},
-					bson.D{bson.E{Key: "updateDescription.updatedFields",
-						Value: bson.D{bson.E{Key: "healtheventstatus.nodequarantined", Value: model.AlreadyQuarantined}}}},
-					bson.D{bson.E{Key: "updateDescription.updatedFields",
-						Value: bson.D{bson.E{Key: "healtheventstatus.nodequarantined", Value: model.UnQuarantined}}}},
-				}},
-			}},
-		},
+// EnvConfig holds configuration loaded from environment variables
+type EnvConfig struct {
+	DatabaseURI               string
+	DatabaseName              string
+	DatabaseCollection        string
+	TokenDatabase             string
+	TokenCollection           string
+	TotalTimeoutSeconds       int
+	IntervalSeconds           int
+	TotalCACertTimeoutSeconds int
+	IntervalCACertSeconds     int
+}
+
+// LoadEnvConfig loads and validates environment variable configuration using centralized store-client
+func LoadEnvConfig() (*EnvConfig, error) {
+	// Use centralized configuration from store-client
+	databaseConfig, err := config.NewDatabaseConfigFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load database configuration: %w", err)
 	}
+
+	// Load token configuration using centralized function
+	tokenConfig, err := config.TokenConfigFromEnv("node-drainer")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load token configuration: %w", err)
+	}
+
+	// Get timeout configuration
+	timeoutConfig := databaseConfig.GetTimeoutConfig()
+
+	return &EnvConfig{
+		DatabaseURI:               databaseConfig.GetConnectionURI(),
+		DatabaseName:              databaseConfig.GetDatabaseName(),
+		DatabaseCollection:        databaseConfig.GetCollectionName(),
+		TokenDatabase:             tokenConfig.TokenDatabase,
+		TokenCollection:           tokenConfig.TokenCollection,
+		TotalTimeoutSeconds:       timeoutConfig.GetPingTimeoutSeconds(),
+		IntervalSeconds:           timeoutConfig.GetPingIntervalSeconds(),
+		TotalCACertTimeoutSeconds: timeoutConfig.GetCACertTimeoutSeconds(),
+		IntervalCACertSeconds:     timeoutConfig.GetCACertIntervalSeconds(),
+	}, nil
+}
+
+// NewDatabaseConfig creates a database configuration from environment config and certificate paths
+func NewDatabaseConfig(databaseClientCertMountPath string) (config.DatabaseConfig, error) {
+	if databaseClientCertMountPath != "" {
+		return config.NewDatabaseConfigFromEnvWithDefaults(databaseClientCertMountPath)
+	}
+
+	return config.NewDatabaseConfigFromEnv()
+}
+
+// NewTokenConfig creates a token configuration from environment config
+func NewTokenConfig(envConfig *EnvConfig) client.TokenConfig {
+	return client.TokenConfig{
+		ClientName:      "node-draining-module",
+		TokenDatabase:   envConfig.TokenDatabase,
+		TokenCollection: envConfig.TokenCollection,
+	}
+}
+
+// NewQuarantinePipeline creates the database change stream pipeline for watching quarantine events
+// This consolidates pipeline creation using the centralized store-client
+func NewQuarantinePipeline() interface{} {
+	return client.BuildNodeQuarantineStatusUpdatesPipeline()
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package storewatcher
+package watcher
 
 import (
 	"context"
@@ -35,6 +35,36 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 )
 
+// Event represents a database-agnostic event that abstracts away provider-specific types
+type Event map[string]interface{}
+
+type MongoDBClientTLSCertConfig struct {
+	TlsCertPath string
+	TlsKeyPath  string
+	CaCertPath  string
+}
+
+// MongoDBConfig holds the MongoDB connection configuration.
+type MongoDBConfig struct {
+	URI                              string
+	Database                         string
+	Collection                       string
+	ClientTLSCertConfig              MongoDBClientTLSCertConfig
+	TotalPingTimeoutSeconds          int
+	TotalPingIntervalSeconds         int
+	TotalCACertTimeoutSeconds        int
+	TotalCACertIntervalSeconds       int
+	ChangeStreamRetryDeadlineSeconds int
+	ChangeStreamRetryIntervalSeconds int
+}
+
+// TokenConfig holds the token-specific configuration.
+type TokenConfig struct {
+	ClientName      string
+	TokenDatabase   string
+	TokenCollection string
+}
+
 // Struct for ResumeToken retrieval
 type TokenDoc struct {
 	ResumeToken bson.Raw `bson:"resumeToken"`
@@ -43,7 +73,7 @@ type TokenDoc struct {
 type ChangeStreamWatcher struct {
 	client                    *mongo.Client
 	changeStream              *mongo.ChangeStream
-	eventChannel              chan bson.M
+	eventChannel              chan Event
 	resumeTokenCol            *mongo.Collection
 	clientName                string
 	mu                        sync.Mutex
@@ -147,7 +177,7 @@ func NewChangeStreamWatcher(
 	watcher := &ChangeStreamWatcher{
 		client:                    client,
 		changeStream:              cs,
-		eventChannel:              make(chan bson.M),
+		eventChannel:              make(chan Event),
 		resumeTokenCol:            tokenColl,
 		clientName:                tokenConfig.ClientName,
 		resumeTokenUpdateTimeout:  totalTimeout,
@@ -281,13 +311,23 @@ func (w *ChangeStreamWatcher) Start(ctx context.Context) {
 					w.mu.Unlock()
 
 					if err != nil {
-						slog.Info("Failed to decode change stream event", "error", err)
+						slog.Error("Failed to decode change stream event", "client", w.clientName, "error", err)
 						continue
 					}
 
-					w.eventChannel <- event
+					// Convert MongoDB-specific bson.M to database-agnostic Event type
+					genericEvent := Event(event)
+
+					// Use blocking send to guarantee delivery (like main branch)
+					// This ensures no events are lost between sender and receiver.
+					// The goroutine may block here if receiver is not ready,
+					// but this guarantees the event will be delivered once receiver is available.
+					// The context check in the outer select will catch cancellation between events.
+					// Proper shutdown sequence (Close -> close change stream -> close channel) ensures
+					// this goroutine exits cleanly without deadlock.
+					w.eventChannel <- genericEvent
 				} else if csErr != nil {
-					slog.Error("Failed to watch change stream", "error", csErr)
+					slog.Error("Failed to watch change stream", "client", w.clientName, "error", csErr)
 				}
 			}
 		}
@@ -324,7 +364,7 @@ func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 	}
 }
 
-func (w *ChangeStreamWatcher) Events() <-chan bson.M {
+func (w *ChangeStreamWatcher) Events() <-chan Event {
 	return w.eventChannel
 }
 
@@ -508,7 +548,15 @@ func constructMongoClientOptions(
 		AuthSource:    "$external",
 	}
 
-	return options.Client().ApplyURI(mongoConfig.URI).SetTLSConfig(tlsConfig).SetAuth(credential), nil
+	// Set server selection timeout to allow MongoDB time to become ready
+	// This uses the same timeout as the ping timeout for consistency
+	serverSelectionTimeout := time.Duration(mongoConfig.TotalPingTimeoutSeconds) * time.Second
+
+	return options.Client().
+		ApplyURI(mongoConfig.URI).
+		SetTLSConfig(tlsConfig).
+		SetAuth(credential).
+		SetServerSelectionTimeout(serverSelectionTimeout), nil
 }
 
 func ConstructClientTLSConfig(

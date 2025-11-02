@@ -16,6 +16,7 @@ package reconciler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -26,17 +27,16 @@ import (
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/common"
-	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
+	"github.com/nvidia/nvsentinel/store-client/pkg/watcher"
 )
 
 type ReconcilerConfig struct {
-	MongoConfig        storewatcher.MongoDBConfig
-	TokenConfig        storewatcher.TokenConfig
-	MongoPipeline      mongo.Pipeline
+	DataStoreConfig    datastore.DataStoreConfig
+	TokenConfig        client.TokenConfig
+	Pipeline           datastore.Pipeline
 	RemediationClient  FaultRemediationClientInterface
 	StateManager       statemanager.StateManager
 	EnableLogCollector bool
@@ -53,7 +53,13 @@ type Reconciler struct {
 }
 
 type HealthEventDoc struct {
-	ID                          primitive.ObjectID `bson:"_id"`
+	ID                          string `json:"_id"`
+	model.HealthEventWithStatus `json:",inline"`
+}
+
+// HealthEventData represents health event data with string ID for compatibility
+type HealthEventData struct {
+	ID                          string `bson:"_id,omitempty"`
 	model.HealthEventWithStatus `bson:",inline"`
 }
 
@@ -68,41 +74,52 @@ func NewReconciler(cfg ReconcilerConfig, dryRunEnabled bool) *Reconciler {
 }
 
 func (r *Reconciler) Start(ctx context.Context) error {
-	watcher, err := storewatcher.NewChangeStreamWatcher(ctx, r.Config.MongoConfig, r.Config.TokenConfig,
-		r.Config.MongoPipeline)
+	// Create datastore instance
+	ds, err := datastore.NewDataStore(ctx, r.Config.DataStoreConfig)
+	if err != nil {
+		return fmt.Errorf("error initializing datastore: %w", err)
+	}
+
+	defer func() {
+		if err := ds.Close(ctx); err != nil {
+			slog.Error("failed to close datastore", "error", err)
+		}
+	}()
+
+	// Create watcher using the factory pattern
+	watcherConfig := watcher.WatcherConfig{
+		Pipeline:       r.Config.Pipeline,
+		CollectionName: "HealthEvents",
+	}
+
+	watcherInstance, err := watcher.CreateChangeStreamWatcher(ctx, ds, watcherConfig)
 	if err != nil {
 		return fmt.Errorf("error initializing change stream watcher: %w", err)
 	}
 
 	defer func() {
-		if err := watcher.Close(ctx); err != nil {
+		if err := watcherInstance.Close(ctx); err != nil {
 			slog.Error("failed to close watcher", "error", err)
 		}
 	}()
 
-	collection, err := storewatcher.GetCollectionClient(ctx, r.Config.MongoConfig)
-	if err != nil {
-		slog.Error("error initializing collection client for mongodb",
-			"config", r.Config.MongoConfig,
-			"error", err)
+	// Get the HealthEventStore for document operations
+	healthEventStore := ds.HealthEventStore()
 
-		return fmt.Errorf("error initializing collection client for mongodb: %w", err)
-	}
-
-	watcher.Start(ctx)
+	watcherInstance.Start(ctx)
 	slog.Info("Listening for events on the channel...")
 
-	for event := range watcher.Events() {
+	for event := range watcherInstance.Events() {
 		slog.Info("Event received", "event", event)
-		r.processEvent(ctx, event, watcher, collection)
+		r.processEvent(ctx, event, watcherInstance, healthEventStore)
 	}
 
 	return nil
 }
 
 // processEvent handles a single event from the watcher
-func (r *Reconciler) processEvent(ctx context.Context, event bson.M, watcher WatcherInterface,
-	collection MongoInterface) {
+func (r *Reconciler) processEvent(ctx context.Context, eventWithToken datastore.EventWithToken,
+	watcherInstance datastore.ChangeStreamWatcher, healthEventStore datastore.HealthEventStore) {
 	start := time.Now()
 
 	defer func() {
@@ -111,16 +128,14 @@ func (r *Reconciler) processEvent(ctx context.Context, event bson.M, watcher Wat
 
 	totalEventsReceived.Inc()
 
-	healthEventWithStatus := HealthEventDoc{}
-	if err := storewatcher.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus); err != nil {
-		processingErrors.WithLabelValues("unmarshal_doc_error", "unknown").Inc()
-		slog.Error("Failed to unmarshal event", "error", err)
+	healthEventWithStatus, err := r.parseHealthEvent(eventWithToken, watcherInstance)
+	if err != nil {
+		return
+	}
 
-		if err := watcher.MarkProcessed(context.Background()); err != nil {
-			processingErrors.WithLabelValues("mark_processed_error", "unknown").Inc()
-			slog.Error("Error updating resume token", "error", err)
-		}
-
+	// Safety checks for nil pointers
+	if healthEventWithStatus.HealthEvent == nil {
+		slog.Warn("HealthEvent is nil, skipping processing")
 		return
 	}
 
@@ -128,11 +143,11 @@ func (r *Reconciler) processEvent(ctx context.Context, event bson.M, watcher Wat
 	nodeQuarantined := healthEventWithStatus.HealthEventStatus.NodeQuarantined
 
 	if nodeQuarantined != nil && *nodeQuarantined == model.UnQuarantined {
-		r.handleUnquarantineEvent(ctx, nodeName, watcher)
+		r.handleUnquarantineEvent(ctx, nodeName, watcherInstance, eventWithToken.ResumeToken)
 		return
 	}
 
-	r.handleRemediationEvent(ctx, &healthEventWithStatus, event, watcher, collection)
+	r.handleRemediationEvent(ctx, &healthEventWithStatus, eventWithToken, watcherInstance, healthEventStore)
 }
 
 func (r *Reconciler) shouldSkipEvent(ctx context.Context,
@@ -213,7 +228,12 @@ func (r *Reconciler) performRemediation(ctx context.Context, healthEventWithStat
 			"attempt", i,
 			"node", healthEventWithStatus.HealthEvent.NodeName)
 
-		success, crName = r.Config.RemediationClient.CreateMaintenanceResource(ctx, healthEventWithStatus)
+		healthEventData := &HealthEventData{
+			ID:                    healthEventWithStatus.ID,
+			HealthEventWithStatus: healthEventWithStatus.HealthEventWithStatus,
+		}
+
+		success, crName = r.Config.RemediationClient.CreateMaintenanceResource(ctx, healthEventData)
 		if success {
 			break
 		}
@@ -250,7 +270,8 @@ func (r *Reconciler) performRemediation(ctx context.Context, healthEventWithStat
 func (r *Reconciler) handleUnquarantineEvent(
 	ctx context.Context,
 	nodeName string,
-	watcher WatcherInterface,
+	watcherInstance datastore.ChangeStreamWatcher,
+	resumeToken []byte,
 ) {
 	slog.Info("Node unquarantined, clearing remediation state annotation",
 		"node", nodeName)
@@ -261,7 +282,7 @@ func (r *Reconciler) handleUnquarantineEvent(
 			"error", err)
 	}
 
-	if err := watcher.MarkProcessed(context.Background()); err != nil {
+	if err := watcherInstance.MarkProcessed(context.Background(), resumeToken); err != nil {
 		processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 		slog.Error("Error updating resume token", "error", err)
 	}
@@ -271,9 +292,9 @@ func (r *Reconciler) handleUnquarantineEvent(
 func (r *Reconciler) handleRemediationEvent(
 	ctx context.Context,
 	healthEventWithStatus *HealthEventDoc,
-	event bson.M,
-	watcher WatcherInterface,
-	collection MongoInterface,
+	eventWithToken datastore.EventWithToken,
+	watcherInstance datastore.ChangeStreamWatcher,
+	healthEventStore datastore.HealthEventStore,
 ) {
 	healthEvent := healthEventWithStatus.HealthEvent
 	nodeName := healthEvent.NodeName
@@ -282,7 +303,7 @@ func (r *Reconciler) handleRemediationEvent(
 
 	// Check if we should skip this event (NONE actions or unsupported actions)
 	if r.shouldSkipEvent(ctx, healthEventWithStatus.HealthEventWithStatus) {
-		if err := watcher.MarkProcessed(ctx); err != nil {
+		if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
 			processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 			slog.Error("Error updating resume token", "error", err)
 		}
@@ -303,7 +324,7 @@ func (r *Reconciler) handleRemediationEvent(
 
 		eventsProcessed.WithLabelValues(CRStatusSkipped, nodeName).Inc()
 
-		if err := watcher.MarkProcessed(ctx); err != nil {
+		if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
 			processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 			slog.Error("Error updating resume token", "error", err)
 		}
@@ -313,7 +334,7 @@ func (r *Reconciler) handleRemediationEvent(
 
 	nodeRemediatedStatus, _ := r.performRemediation(ctx, healthEventWithStatus)
 
-	if err := r.updateNodeRemediatedStatus(ctx, collection, event, nodeRemediatedStatus); err != nil {
+	if err := r.updateNodeRemediatedStatus(ctx, healthEventStore, eventWithToken, nodeRemediatedStatus); err != nil {
 		processingErrors.WithLabelValues("update_status_error", nodeName).Inc()
 		log.Printf("\nError updating remediation status for node: %+v\n", err)
 
@@ -322,55 +343,52 @@ func (r *Reconciler) handleRemediationEvent(
 
 	eventsProcessed.WithLabelValues(CRStatusCreated, nodeName).Inc()
 
-	if err := watcher.MarkProcessed(ctx); err != nil {
+	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
 		processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 		slog.Error("Error updating resume token", "error", err)
 	}
 }
 
-func (r *Reconciler) updateNodeRemediatedStatus(ctx context.Context, collection MongoInterface,
-	event bson.M, nodeRemediatedStatus bool) error {
-	var err error
-
-	document, ok := event["fullDocument"].(bson.M)
-	if !ok {
-		return fmt.Errorf("error extracting fullDocument from event: %+v", event)
+func (r *Reconciler) updateNodeRemediatedStatus(ctx context.Context, healthEventStore datastore.HealthEventStore,
+	eventWithToken datastore.EventWithToken, nodeRemediatedStatus bool) error {
+	documentID, err := utils.ExtractDocumentID(eventWithToken.Event)
+	if err != nil {
+		return err
 	}
 
-	filter := bson.M{"_id": document["_id"]}
-
-	updateFields := bson.M{
-		"healtheventstatus.faultremediated": nodeRemediatedStatus,
-	}
+	// Create status object for the update
+	status := datastore.HealthEventStatus{}
+	faultRemediated := nodeRemediatedStatus
+	status.FaultRemediated = &faultRemediated
 
 	// If remediation was successful, set the timestamp
 	if nodeRemediatedStatus {
-		updateFields["healtheventstatus.lastremediationtimestamp"] = time.Now().UTC()
+		now := time.Now().UTC()
+		status.LastRemediationTimestamp = &now
 	}
 
-	update := bson.M{
-		"$set": updateFields,
-	}
-
+	// Use the healthEventStore to update the status with retries
 	for i := 1; i <= r.Config.UpdateMaxRetries; i++ {
 		slog.Info("Updating health event with ID",
 			"attempt", i,
-			"id", document["_id"])
+			"id", documentID)
 
-		_, err = collection.UpdateOne(ctx, filter, update)
+		err = healthEventStore.UpdateHealthEventStatus(ctx, documentID, status)
 		if err == nil {
 			break
 		}
 
-		time.Sleep(r.Config.UpdateRetryDelay)
+		if i < r.Config.UpdateMaxRetries {
+			time.Sleep(r.Config.UpdateRetryDelay)
+		}
 	}
 
 	if err != nil {
-		return fmt.Errorf("error updating document with ID: %v, error: %w", document["_id"], err)
+		return fmt.Errorf("error updating document with ID: %v, error: %w", documentID, err)
 	}
 
 	slog.Info("Health event has been updated with status",
-		"id", document["_id"],
+		"id", documentID,
 		"status", nodeRemediatedStatus)
 
 	return nil
@@ -424,4 +442,49 @@ func (r *Reconciler) checkExistingCRStatus(
 	}
 
 	return true, "", nil
+}
+
+// parseHealthEvent extracts and parses health event from change stream event
+// The eventWithToken.Event is already the fullDocument extracted by the store-client
+func (r *Reconciler) parseHealthEvent(eventWithToken datastore.EventWithToken,
+	watcherInstance datastore.ChangeStreamWatcher) (HealthEventDoc, error) {
+	var healthEventWithStatus HealthEventDoc
+
+	// Extract the fullDocument from the change stream event
+	var documentToUnmarshal interface{}
+	if fullDoc, ok := eventWithToken.Event["fullDocument"]; ok {
+		// This is a change stream event, extract the fullDocument
+		documentToUnmarshal = fullDoc
+	} else {
+		// This is already the document itself
+		documentToUnmarshal = eventWithToken.Event
+	}
+
+	// Convert to JSON and then unmarshal to get proper structure
+	jsonBytes, err := json.Marshal(documentToUnmarshal)
+	if err != nil {
+		processingErrors.WithLabelValues("marshal_error", "unknown").Inc()
+		slog.Error("Error marshaling event to JSON", "error", err)
+
+		if err := watcherInstance.MarkProcessed(context.Background(), eventWithToken.ResumeToken); err != nil {
+			processingErrors.WithLabelValues("mark_processed_error", "unknown").Inc()
+			slog.Error("Error updating resume token", "error", err)
+		}
+
+		return healthEventWithStatus, fmt.Errorf("error marshaling event to JSON: %w", err)
+	}
+
+	if err := json.Unmarshal(jsonBytes, &healthEventWithStatus); err != nil {
+		processingErrors.WithLabelValues("unmarshal_doc_error", "unknown").Inc()
+		slog.Error("Error unmarshaling event", "error", err)
+
+		if err := watcherInstance.MarkProcessed(context.Background(), eventWithToken.ResumeToken); err != nil {
+			processingErrors.WithLabelValues("mark_processed_error", "unknown").Inc()
+			slog.Error("Error updating resume token", "error", err)
+		}
+
+		return healthEventWithStatus, fmt.Errorf("error unmarshaling event: %w", err)
+	}
+
+	return healthEventWithStatus, nil
 }

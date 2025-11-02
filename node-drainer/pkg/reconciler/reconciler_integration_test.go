@@ -16,6 +16,7 @@ package reconciler_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -28,21 +29,110 @@ import (
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/metrics"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/queue"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
+	sdkclient "github.com/nvidia/nvsentinel/store-client/pkg/client"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client/pkg/config"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
+
+// mockDatabaseConfig is a simple mock implementation for testing
+type mockDatabaseConfig struct {
+	connectionURI  string
+	databaseName   string
+	collectionName string
+}
+
+// mockDataStore is a mock implementation of queue.DataStore for testing
+type mockDataStore struct{}
+
+func (m *mockDataStore) UpdateDocument(ctx context.Context, filter, update interface{}) (*sdkclient.UpdateResult, error) {
+	// Mock implementation - just return success
+	return &sdkclient.UpdateResult{
+		MatchedCount:  1,
+		ModifiedCount: 1,
+	}, nil
+}
+
+func (m *mockDataStore) FindDocument(ctx context.Context, filter interface{}, options *sdkclient.FindOneOptions) (sdkclient.SingleResult, error) {
+	// Mock implementation - return nil for now
+	return nil, nil
+}
+
+func (m *mockDataStore) FindDocuments(ctx context.Context, filter interface{}, options *sdkclient.FindOptions) (sdkclient.Cursor, error) {
+	// Mock implementation - return nil for now
+	return nil, nil
+}
+
+
+func (m *mockDatabaseConfig) GetConnectionURI() string {
+	return m.connectionURI
+}
+
+func (m *mockDatabaseConfig) GetDatabaseName() string {
+	return m.databaseName
+}
+
+func (m *mockDatabaseConfig) GetCollectionName() string {
+	return m.collectionName
+}
+
+func (m *mockDatabaseConfig) GetCertConfig() sdkconfig.CertificateConfig {
+	return &mockCertConfig{}
+}
+
+func (m *mockDatabaseConfig) GetTimeoutConfig() sdkconfig.TimeoutConfig {
+	return &mockTimeoutConfig{}
+}
+
+// mockCertConfig is a simple mock implementation for testing
+type mockCertConfig struct{}
+
+func (m *mockCertConfig) GetCertPath() string {
+	return "/tmp/test.crt"
+}
+
+func (m *mockCertConfig) GetKeyPath() string {
+	return "/tmp/test.key"
+}
+
+func (m *mockCertConfig) GetCACertPath() string {
+	return "/tmp/ca.crt"
+}
+
+// mockTimeoutConfig is a simple mock implementation for testing
+type mockTimeoutConfig struct{}
+
+func (m *mockTimeoutConfig) GetPingTimeoutSeconds() int {
+	return 300
+}
+
+func (m *mockTimeoutConfig) GetPingIntervalSeconds() int {
+	return 5
+}
+
+func (m *mockTimeoutConfig) GetCACertTimeoutSeconds() int {
+	return 360
+}
+
+func (m *mockTimeoutConfig) GetCACertIntervalSeconds() int {
+	return 5
+}
+
+func (m *mockTimeoutConfig) GetChangeStreamRetryDeadlineSeconds() int {
+	return 60
+}
+
+func (m *mockTimeoutConfig) GetChangeStreamRetryIntervalSeconds() int {
+	return 3
+}
 
 // go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 // source <(setup-envtest use -p env)
@@ -59,7 +149,7 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 		nodeQuarantined      model.Status
 		drainForce           bool
 		existingNodeLabels   map[string]string
-		mongoFindOneResponse *bson.M
+		mongoFindOneResponse map[string]interface{}
 		expectError          bool
 		expectedNodeLabel    *string
 		validateFunc         func(t *testing.T, client kubernetes.Interface, ctx context.Context, nodeName string, err error)
@@ -215,10 +305,10 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 			namespaces:      []string{"test-ns"},
 			nodeQuarantined: model.AlreadyQuarantined,
 			pods:            []*v1.Pod{},
-			mongoFindOneResponse: &bson.M{
-				"healtheventstatus": bson.M{
+			mongoFindOneResponse: map[string]interface{}{
+				"healtheventstatus": map[string]interface{}{
 					"nodequarantined": string(model.Quarantined),
-					"userpodsevictionstatus": bson.M{
+					"userpodsevictionstatus": map[string]interface{}{
 						"status": string(model.StatusSucceeded),
 					},
 				},
@@ -320,8 +410,9 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 			}
 
 			if tt.mongoFindOneResponse != nil {
-				setup.mockCollection.FindOneFunc = func(ctx context.Context, filter any, opts ...*options.FindOneOptions) *mongo.SingleResult {
-					return mongo.NewSingleResultFromDocument(*tt.mongoFindOneResponse, nil, nil)
+				setup.mockCollection.FindDocumentFunc = func(ctx context.Context, filter interface{}, options *sdkclient.FindOneOptions) (sdkclient.SingleResult, error) {
+					// Return a mock single result that contains the test data
+					return &mockSingleResult{document: tt.mongoFindOneResponse}, nil
 				}
 			}
 
@@ -460,8 +551,8 @@ func TestReconciler_AllowCompletionRequeue(t *testing.T) {
 		}
 		if pod.Status.Phase == v1.PodSucceeded {
 			pod.Finalizers = nil
-			setup.client.CoreV1().Pods("completion-test").Update(setup.ctx, pod, metav1.UpdateOptions{})
-			setup.client.CoreV1().Pods("completion-test").Delete(setup.ctx, "running-pod", metav1.DeleteOptions{
+			_, _ = setup.client.CoreV1().Pods("completion-test").Update(setup.ctx, pod, metav1.UpdateOptions{})
+			_ = setup.client.CoreV1().Pods("completion-test").Delete(setup.ctx, "running-pod", metav1.DeleteOptions{
 				GracePeriodSeconds: ptr.To(int64(0)),
 			})
 		}
@@ -506,30 +597,118 @@ func TestReconciler_MultipleNodesRequeue(t *testing.T) {
 }
 
 type MockMongoCollection struct {
-	UpdateOneFunc func(ctx context.Context, filter any, update any, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error)
-	FindOneFunc   func(ctx context.Context, filter any, opts ...*options.FindOneOptions) *mongo.SingleResult
-	FindFunc      func(ctx context.Context, filter any, opts ...*options.FindOptions) (*mongo.Cursor, error)
+	// Database-agnostic functions
+	UpdateDocumentFunc func(ctx context.Context, filter interface{}, update interface{}) (*sdkclient.UpdateResult, error)
+	FindDocumentFunc   func(ctx context.Context, filter interface{}, options *sdkclient.FindOneOptions) (sdkclient.SingleResult, error)
+	FindDocumentsFunc  func(ctx context.Context, filter interface{}, options *sdkclient.FindOptions) (sdkclient.Cursor, error)
 }
 
-func (m *MockMongoCollection) UpdateOne(ctx context.Context, filter any, update any, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
-	if m.UpdateOneFunc != nil {
-		return m.UpdateOneFunc(ctx, filter, update, opts...)
-	}
-	return &mongo.UpdateResult{ModifiedCount: 1}, nil
+// mockSingleResult implements sdkclient.SingleResult interface for testing
+type mockSingleResult struct {
+	document map[string]interface{}
+	err      error
 }
 
-func (m *MockMongoCollection) FindOne(ctx context.Context, filter any, opts ...*options.FindOneOptions) *mongo.SingleResult {
-	if m.FindOneFunc != nil {
-		return m.FindOneFunc(ctx, filter, opts...)
+func (m *mockSingleResult) Decode(v interface{}) error {
+	if m.err != nil {
+		return m.err
 	}
-	return &mongo.SingleResult{}
+	// Simple JSON marshal/unmarshal to simulate document decoding
+	jsonBytes, err := json.Marshal(m.document)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(jsonBytes, v)
 }
 
-func (m *MockMongoCollection) Find(ctx context.Context, filter any, opts ...*options.FindOptions) (*mongo.Cursor, error) {
-	if m.FindFunc != nil {
-		return m.FindFunc(ctx, filter, opts...)
+func (m *mockSingleResult) Err() error {
+	return m.err
+}
+
+// DataStore interface methods
+func (m *MockMongoCollection) UpdateDocument(ctx context.Context, filter interface{}, update interface{}) (*sdkclient.UpdateResult, error) {
+	if m.UpdateDocumentFunc != nil {
+		return m.UpdateDocumentFunc(ctx, filter, update)
 	}
-	return nil, nil
+	return &sdkclient.UpdateResult{ModifiedCount: 1}, nil
+}
+
+func (m *MockMongoCollection) FindDocument(ctx context.Context, filter interface{}, options *sdkclient.FindOneOptions) (sdkclient.SingleResult, error) {
+	if m.FindDocumentFunc != nil {
+		return m.FindDocumentFunc(ctx, filter, options)
+	}
+	// Return a mock result for tests
+	return &MockSingleResult{}, nil
+}
+
+func (m *MockMongoCollection) FindDocuments(ctx context.Context, filter interface{}, options *sdkclient.FindOptions) (sdkclient.Cursor, error) {
+	if m.FindDocumentsFunc != nil {
+		return m.FindDocumentsFunc(ctx, filter, options)
+	}
+	return &MockCursor{}, nil
+}
+
+// Mock implementations for client interfaces
+type MockSingleResult struct {
+	DecodeFunc func(v interface{}) error
+	ErrFunc    func() error
+}
+
+func (m *MockSingleResult) Decode(v interface{}) error {
+	if m.DecodeFunc != nil {
+		return m.DecodeFunc(v)
+	}
+	return nil
+}
+
+func (m *MockSingleResult) Err() error {
+	if m.ErrFunc != nil {
+		return m.ErrFunc()
+	}
+	return nil
+}
+
+type MockCursor struct {
+	AllFunc    func(ctx context.Context, results interface{}) error
+	NextFunc   func(ctx context.Context) bool
+	CloseFunc  func(ctx context.Context) error
+	DecodeFunc func(val interface{}) error
+	ErrFunc    func() error
+}
+
+func (m *MockCursor) All(ctx context.Context, results interface{}) error {
+	if m.AllFunc != nil {
+		return m.AllFunc(ctx, results)
+	}
+	return nil
+}
+
+func (m *MockCursor) Next(ctx context.Context) bool {
+	if m.NextFunc != nil {
+		return m.NextFunc(ctx)
+	}
+	return false
+}
+
+func (m *MockCursor) Close(ctx context.Context) error {
+	if m.CloseFunc != nil {
+		return m.CloseFunc(ctx)
+	}
+	return nil
+}
+
+func (m *MockCursor) Decode(val interface{}) error {
+	if m.DecodeFunc != nil {
+		return m.DecodeFunc(val)
+	}
+	return nil
+}
+
+func (m *MockCursor) Err() error {
+	if m.ErrFunc != nil {
+		return m.ErrFunc()
+	}
+	return nil
 }
 
 type requeueTestSetup struct {
@@ -552,7 +731,7 @@ func setupDirectTest(t *testing.T, userNamespaces []config.UserNamespace, dryRun
 	testEnv := envtest.Environment{}
 	cfg, err := testEnv.Start()
 	require.NoError(t, err)
-	t.Cleanup(func() { testEnv.Stop() })
+	t.Cleanup(func() { _ = testEnv.Stop() })
 
 	client, err := kubernetes.NewForConfig(cfg)
 	require.NoError(t, err)
@@ -565,21 +744,33 @@ func setupDirectTest(t *testing.T, userNamespaces []config.UserNamespace, dryRun
 		UserNamespaces:            userNamespaces,
 	}
 
+	// Create mock database config for testing
+	mockDatabaseConfig := &mockDatabaseConfig{
+		connectionURI:  "mongodb://localhost:27017",
+		databaseName:   "test_db",
+		collectionName: "test_collection",
+	}
+
 	reconcilerConfig := config.ReconcilerConfig{
-		TomlConfig:    tomlConfig,
-		MongoConfig:   storewatcher.MongoDBConfig{},
-		TokenConfig:   storewatcher.TokenConfig{},
-		MongoPipeline: mongo.Pipeline{},
-		StateManager:  statemanager.NewStateManager(client),
+		TomlConfig:     tomlConfig,
+		DatabaseConfig: mockDatabaseConfig,
+		TokenConfig: sdkclient.TokenConfig{
+			ClientName:      "test-client",
+			TokenDatabase:   "test_db",
+			TokenCollection: "tokens",
+		},
+		StateManager: statemanager.NewStateManager(client),
 	}
 
 	informersInstance, err := informers.NewInformers(client, 1*time.Minute, ptr.To(2), dryRun)
 	require.NoError(t, err)
 
-	go informersInstance.Run(ctx)
+	go func() { _ = informersInstance.Run(ctx) }()
 	require.Eventually(t, informersInstance.HasSynced, 30*time.Second, 1*time.Second)
 
-	r := reconciler.NewReconciler(reconcilerConfig, dryRun, client, informersInstance)
+	// Create a mock database client for the test
+	mockDB := &mockDataStore{}
+	r := reconciler.NewReconciler(reconcilerConfig, dryRun, client, informersInstance, mockDB)
 
 	return &testSetup{
 		ctx:               ctx,
@@ -646,7 +837,7 @@ type healthEventOptions struct {
 	drainForce      bool
 }
 
-func createHealthEvent(opts healthEventOptions) bson.M {
+func createHealthEvent(opts healthEventOptions) map[string]interface{} {
 	healthEvent := &protos.HealthEvent{
 		NodeName:  opts.nodeName,
 		CheckName: "test-check",
@@ -656,16 +847,17 @@ func createHealthEvent(opts healthEventOptions) bson.M {
 		healthEvent.DrainOverrides = &protos.BehaviourOverrides{Force: true}
 	}
 
-	return bson.M{
-		"fullDocument": bson.M{
-			"_id":         opts.nodeName + "-event",
-			"healthevent": healthEvent,
-			"healtheventstatus": model.HealthEventStatus{
-				NodeQuarantined:        &opts.nodeQuarantined,
-				UserPodsEvictionStatus: model.OperationStatus{Status: model.StatusInProgress},
-			},
-			"createdAt": time.Now(),
+	eventID := opts.nodeName + "-event"
+	// Return just the fullDocument content, as the event watcher extracts this
+	// from the change stream before passing to the reconciler
+	return map[string]interface{}{
+		"_id":         eventID,
+		"healthevent": healthEvent,
+		"healtheventstatus": model.HealthEventStatus{
+			NodeQuarantined:        &opts.nodeQuarantined,
+			UserPodsEvictionStatus: model.OperationStatus{Status: model.StatusInProgress},
 		},
+		"createdAt": time.Now(),
 	}
 }
 
@@ -675,13 +867,13 @@ func enqueueHealthEvent(ctx context.Context, t *testing.T, queueMgr queue.EventQ
 		nodeName:        nodeName,
 		nodeQuarantined: model.Quarantined,
 	})
-	require.NoError(t, queueMgr.EnqueueEvent(ctx, nodeName, event, collection))
+	require.NoError(t, queueMgr.EnqueueEventGeneric(ctx, nodeName, event, collection))
 }
 
 func processHealthEvent(ctx context.Context, t *testing.T, r *reconciler.Reconciler, collection *MockMongoCollection, opts healthEventOptions) error {
 	t.Helper()
 	event := createHealthEvent(opts)
-	return r.ProcessEvent(ctx, event, collection, opts.nodeName)
+	return r.ProcessEventGeneric(ctx, event, collection, opts.nodeName)
 }
 
 func assertNodeLabel(t *testing.T, client kubernetes.Interface, ctx context.Context, nodeName string, expectedLabel statemanager.NVSentinelStateLabelValue) {
@@ -708,7 +900,7 @@ func assertPodsEvicted(t *testing.T, client kubernetes.Interface, ctx context.Co
 			} else {
 				pod := p
 				pod.Finalizers = nil
-				client.CoreV1().Pods(namespace).Update(ctx, &pod, metav1.UpdateOptions{})
+				_, _ = client.CoreV1().Pods(namespace).Update(ctx, &pod, metav1.UpdateOptions{})
 			}
 		}
 		return allMarkedForDeletion
@@ -718,7 +910,7 @@ func assertPodsEvicted(t *testing.T, client kubernetes.Interface, ctx context.Co
 		pods, _ := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 		for _, p := range pods.Items {
 			if p.DeletionTimestamp != nil {
-				client.CoreV1().Pods(namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
+				_ = client.CoreV1().Pods(namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
 					GracePeriodSeconds: ptr.To(int64(0)),
 				})
 			}
@@ -738,10 +930,10 @@ func TestMetrics_ProcessingErrors(t *testing.T) {
 	nodeName := "test-node"
 	beforeError := getCounterVecValue(t, metrics.ProcessingErrors, "unmarshal_error", nodeName)
 
-	invalidEvent := bson.M{
-		"fullDocument": "invalid",
+	invalidEvent := map[string]interface{}{
+		"invalid": "structure",
 	}
-	setup.reconciler.ProcessEvent(setup.ctx, invalidEvent, setup.mockCollection, nodeName)
+	_ = setup.reconciler.ProcessEventGeneric(setup.ctx, invalidEvent, setup.mockCollection, nodeName)
 
 	afterError := getCounterVecValue(t, metrics.ProcessingErrors, "unmarshal_error", nodeName)
 	assert.Greater(t, afterError, beforeError, "ProcessingErrors should increment for unmarshal_error")
@@ -758,7 +950,7 @@ func TestMetrics_NodeDrainTimeout(t *testing.T) {
 	createNamespace(setup.ctx, t, setup.client, "timeout-test")
 	createPod(setup.ctx, t, setup.client, "timeout-test", "timeout-pod", nodeName, v1.PodRunning)
 
-	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+	_ = processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
 		nodeName:        nodeName,
 		nodeQuarantined: model.Quarantined,
 	})
@@ -776,21 +968,21 @@ func TestMetrics_AlreadyQuarantinedDoesNotIncrementDrainSuccess(t *testing.T) {
 	nodeName := "metrics-already-drained-node"
 	createNode(setup.ctx, t, setup.client, nodeName)
 
-	setup.mockCollection.FindOneFunc = func(ctx context.Context, filter any, opts ...*options.FindOneOptions) *mongo.SingleResult {
-		response := bson.M{
-			"healtheventstatus": bson.M{
+	setup.mockCollection.FindDocumentFunc = func(ctx context.Context, filter interface{}, options *sdkclient.FindOneOptions) (sdkclient.SingleResult, error) {
+		response := map[string]interface{}{
+			"healtheventstatus": map[string]interface{}{
 				"nodequarantined": string(model.Quarantined),
-				"userpodsevictionstatus": bson.M{
+				"userpodsevictionstatus": map[string]interface{}{
 					"status": string(model.StatusSucceeded),
 				},
 			},
 		}
-		return mongo.NewSingleResultFromDocument(response, nil, nil)
+		return &mockSingleResult{document: response}, nil
 	}
 
 	beforeSkipped := getCounterVecValue(t, metrics.EventsProcessed, metrics.DrainStatusSkipped, nodeName)
 
-	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+	_ = processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
 		nodeName:        nodeName,
 		nodeQuarantined: model.AlreadyQuarantined,
 	})

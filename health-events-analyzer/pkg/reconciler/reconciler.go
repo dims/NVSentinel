@@ -18,37 +18,36 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"reflect"
+	"strings"
 	"time"
 
 	multierror "github.com/hashicorp/go-multierror"
 	datamodels "github.com/nvidia/nvsentinel/data-models/pkg/model"
 	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
-	parser "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/parser"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
-	"go.mongodb.org/mongo-driver/bson"
-
-	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client/pkg/helper"
 )
 
-type CollectionInterface interface {
-	Aggregate(ctx context.Context, pipeline interface{}, opts ...*options.AggregateOptions) (*mongo.Cursor, error)
-}
+const (
+	maxRetries int           = 5
+	delay      time.Duration = 10 * time.Second
+)
 
 type HealthEventsAnalyzerReconcilerConfig struct {
-	MongoHealthEventCollectionConfig storewatcher.MongoDBConfig
-	TokenConfig                      storewatcher.TokenConfig
-	MongoPipeline                    mongo.Pipeline
-	HealthEventsAnalyzerRules        *config.TomlConfig
-	Publisher                        *publisher.PublisherConfig
-	CollectionClient                 CollectionInterface
+	DataStoreConfig           *datastore.DataStoreConfig
+	Pipeline                  interface{}
+	HealthEventsAnalyzerRules *config.TomlConfig
+	Publisher                 *publisher.PublisherConfig
 }
 
 type Reconciler struct {
-	config HealthEventsAnalyzerReconcilerConfig
+	config         HealthEventsAnalyzerReconcilerConfig
+	databaseClient client.DatabaseClient
+	eventProcessor client.EventProcessor
 }
 
 func NewReconciler(cfg HealthEventsAnalyzerReconcilerConfig) *Reconciler {
@@ -60,92 +59,68 @@ func NewReconciler(cfg HealthEventsAnalyzerReconcilerConfig) *Reconciler {
 // Start begins the reconciliation process by listening to change stream events
 // and processing them accordingly.
 func (r *Reconciler) Start(ctx context.Context) error {
-	watcher, err := storewatcher.NewChangeStreamWatcher(
-		ctx,
-		r.config.MongoHealthEventCollectionConfig,
-		r.config.TokenConfig,
-		r.config.MongoPipeline,
+	// Use standardized datastore client initialization
+	bundle, err := helper.NewDatastoreClientFromConfig(
+		ctx, "health-events-analyzer", *r.config.DataStoreConfig, r.config.Pipeline,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create change stream watcher: %w", err)
+		return fmt.Errorf("failed to create datastore client bundle: %w", err)
 	}
-	defer watcher.Close(ctx)
+	defer bundle.Close(ctx)
 
-	r.config.CollectionClient, err = storewatcher.GetCollectionClient(ctx, r.config.MongoHealthEventCollectionConfig)
-	if err != nil {
-		slog.Error(
-			"Error initializing healthEventCollection client",
-			"config", r.config.MongoHealthEventCollectionConfig,
-			"error", err,
-		)
+	r.databaseClient = bundle.DatabaseClient
 
-		return fmt.Errorf("failed to initialize healthEventCollection client: %w", err)
-	}
-
-	watcher.Start(ctx)
-
-	slog.Info("Listening for events on the channel...")
-
-	for event := range watcher.Events() {
-		slog.Info("Processing event", "event", event)
-
-		err := r.processEvent(ctx, event)
-		if err != nil {
-			slog.Error("Error processing event", "error", err)
-		}
-
-		if err := watcher.MarkProcessed(ctx); err != nil {
-			slog.Error("Error updating resume token", "error", err)
-		}
+	// Create and configure the unified EventProcessor
+	processorConfig := client.EventProcessorConfig{
+		MaxRetries:    maxRetries,
+		RetryDelay:    delay,
+		EnableMetrics: true,
+		MetricsLabels: map[string]string{"module": "health-events-analyzer"},
 	}
 
-	return nil
+	r.eventProcessor = client.NewEventProcessor(bundle.ChangeStreamWatcher, bundle.DatabaseClient, processorConfig)
+
+	// Set the event handler for processing health events
+	r.eventProcessor.SetEventHandler(client.EventHandlerFunc(r.processHealthEvent))
+
+	slog.Info("Starting health events analyzer with unified event processor...")
+
+	// Start the event processor
+	return r.eventProcessor.Start(ctx)
 }
 
-func (r *Reconciler) processEvent(ctx context.Context, event bson.M) error {
+// processHealthEvent handles individual health events and implements the EventHandler interface
+func (r *Reconciler) processHealthEvent(ctx context.Context, event *datamodels.HealthEventWithStatus) error {
 	startTime := time.Now()
 
-	healthEventWithStatus := datamodels.HealthEventWithStatus{}
-	if err := storewatcher.UnmarshalFullDocumentFromEvent(
-		event,
-		&healthEventWithStatus,
-	); err != nil {
-		slog.Error("Failed to unmarshal event", "error", err)
+	slog.Debug("Received event", "event", event)
 
-		totalEventProcessingError.WithLabelValues("unmarshal_doc_error").Inc()
+	// Track event reception metrics
+	totalEventsReceived.WithLabelValues(event.HealthEvent.EntitiesImpacted[0].EntityValue).Inc()
 
-		return fmt.Errorf("failed to unmarshal event: %w", err)
-	}
-
-	slog.Debug("Received event", "event", healthEventWithStatus)
-
-	totalEventsReceived.WithLabelValues(healthEventWithStatus.HealthEvent.NodeName).Inc()
-
-	var err error
-
-	var publishedNewEvent bool
-
-	publishedNewEvent, err = r.handleEvent(ctx, &healthEventWithStatus)
+	// Process the event using existing business logic
+	publishedNewEvent, err := r.handleEvent(ctx, event)
 	if err != nil {
-		slog.Error("Error in handling the event", "event", healthEventWithStatus, "error", err)
-
+		// Log error but let the EventProcessor handle retry logic
 		totalEventProcessingError.WithLabelValues("handle_event_error").Inc()
-	} else {
-		totalEventsSuccessfullyProcessed.Inc()
-
-		if publishedNewEvent {
-			slog.Info("New event successfully published.")
-			newEventsPublishedTotal.WithLabelValues(healthEventWithStatus.HealthEvent.NodeName).Inc()
-		} else {
-			slog.Info("New event is not published, rule set criteria didn't match.")
-		}
+		return fmt.Errorf("failed to handle event: %w", err)
 	}
 
-	duration := time.Since(startTime).Seconds()
+	// Track success metrics
+	totalEventsSuccessfullyProcessed.Inc()
 
+	if publishedNewEvent {
+		slog.Info("New fatal event published.")
+		fatalEventsPublishedTotal.WithLabelValues(event.HealthEvent.EntitiesImpacted[0].EntityValue).Inc()
+	} else {
+		slog.Info("Fatal event is not published, rule set criteria didn't match.")
+	}
+
+	// Track processing duration
+	duration := time.Since(startTime).Seconds()
 	eventHandlingDuration.Observe(duration)
 
-	return err
+	return nil
 }
 
 func (r *Reconciler) handleEvent(ctx context.Context, event *datamodels.HealthEventWithStatus) (bool, error) {
@@ -245,107 +220,170 @@ func (r *Reconciler) validateAllSequenceCriteria(ctx context.Context, rule confi
 		return false, fmt.Errorf("failed to parse time window: %w", err)
 	}
 
-	facets := bson.D{}
-
+	// Check each sequence condition individually
 	for i, seq := range rule.Sequence {
-		slog.Debug("Evaluating sequence", "sequence", seq)
+		// Build the filter using database-agnostic filter builder
+		timeThreshold := time.Now().UTC().Add(-timeWindow).Unix()
+		builder := client.NewFilterBuilder()
+		builder.Gte("healthevent.generatedtimestamp.seconds", timeThreshold)
 
-		facetName := "sequence_" + strconv.Itoa(i)
+		// Exclude events published by health-events-analyzer itself (matches main branch behavior)
+		builder.Ne("healthevent.agent", "health-events-analyzer")
 
-		matchCriteria, err := parser.ParseSequenceString(seq.Criteria, healthEventWithStatus)
+		// Add sequence-specific criteria
+		for key, value := range seq.Criteria {
+			resolvedValue := r.resolveCriteriaValue(value, healthEventWithStatus)
+			builder.Eq(key, resolvedValue)
+		}
+
+		// Build the final filter
+		filter := builder.Build()
+
+		// Count documents matching this sequence
+		count, err := r.databaseClient.CountDocuments(ctx, filter, nil)
 		if err != nil {
-			slog.Error("Failed to parse sequence criteria", "error", err)
+			slog.Error("Failed to count documents for sequence", "sequence", i, "error", err)
+			totalEventProcessingError.WithLabelValues("count_documents_error").Inc()
 
-			totalEventProcessingError.WithLabelValues("parse_criteria_error").Inc()
+			return false, err
+		}
+
+		// Check if count meets the required threshold
+		if count < int64(seq.ErrorCount) {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// resolveCriteriaValue resolves a criteria value, handling "this." references
+func (r *Reconciler) resolveCriteriaValue(
+	value interface{},
+	healthEventWithStatus datamodels.HealthEventWithStatus,
+) interface{} {
+	strValue, ok := value.(string)
+	if !ok {
+		return value
+	}
+
+	if !r.isThisReference(strValue) {
+		return value
+	}
+
+	fieldPath := strValue[5:] // Skip "this."
+
+	resolvedValue, err := getValueFromPath(fieldPath, healthEventWithStatus)
+	if err != nil {
+		slog.Error("Failed to resolve field path", "path", fieldPath, "error", err)
+		return value // fallback to original value
+	}
+
+	return resolvedValue
+}
+
+// isThisReference checks if a string value is a "this." reference
+func (r *Reconciler) isThisReference(strValue string) bool {
+	return len(strValue) > 5 && strValue[:5] == "this."
+}
+
+// getValueFromPath extracts a value from a struct using dot-separated field path
+func getValueFromPath(path string, event datamodels.HealthEventWithStatus) (interface{}, error) {
+	parts := strings.Split(path, ".")
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty path")
+	}
+
+	// Start with the full event
+	value := reflect.ValueOf(event)
+
+	// Navigate through the path
+	for _, part := range parts {
+		if value.Kind() == reflect.Ptr {
+			value = value.Elem()
+		}
+
+		// Handle array/slice indices
+		if isNumericIndex(part) {
+			var err error
+
+			value, err = handleArrayIndex(value, part, path)
+			if err != nil {
+				return nil, err
+			}
 
 			continue
 		}
 
-		facets = append(facets, getFacet(facetName, timeWindow, matchCriteria))
-	}
+		var err error
 
-	if len(facets) == 0 {
-		slog.Debug("No facets created for rule", "rule_name", rule.Name)
-		totalEventProcessingError.WithLabelValues("no_facets_found_error").Inc()
-
-		return false, nil
-	}
-
-	pipeline := getPipeline(facets, rule)
-
-	var result []bson.M
-
-	startTime := time.Now()
-
-	cursor, err := r.config.CollectionClient.Aggregate(ctx, pipeline)
-	if err != nil {
-		slog.Error("Failed to execute aggregation pipeline", "error", err)
-		totalEventProcessingError.WithLabelValues("execute_pipeline_error").Inc()
-
-		return false, fmt.Errorf("failed to execute aggregation pipeline: %w", err)
-	}
-
-	duration := time.Since(startTime).Seconds()
-	databaseQueryDuration.Observe(duration)
-
-	defer cursor.Close(ctx)
-
-	if err = cursor.All(ctx, &result); err != nil {
-		slog.Error("Failed to decode cursor", "error", err)
-		totalEventProcessingError.WithLabelValues("decode_cursor_error").Inc()
-
-		return false, fmt.Errorf("failed to decode cursor: %w", err)
-	}
-
-	if len(result) > 0 {
-		// Check if all criteria are met
-		slog.Debug("Query result", "result", result)
-
-		if matched, ok := result[0]["ruleMatched"].(bool); ok && matched {
-			slog.Debug("All sequence conditions met for rule", "rule_name", rule.Name)
-			return true, nil
+		value, err = navigateStructField(value, part, path)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	return false, nil
+	// Return the interface{} value
+	if value.CanInterface() {
+		return value.Interface(), nil
+	}
+
+	return nil, fmt.Errorf("cannot access value at path %s", path)
 }
 
-func getFacet(facetName string, timeWindow time.Duration, matchCriteria bson.D) bson.E {
-	return bson.E{
-		Key: facetName,
-		Value: bson.A{
-			bson.D{{Key: "$match", Value: bson.D{
-				{Key: "healthevent.generatedtimestamp.seconds", Value: bson.D{
-					{Key: "$gte", Value: time.Now().UTC().Add(-timeWindow).Unix()},
-				}},
-				{Key: "healthevent.agent", Value: bson.D{{Key: "$ne", Value: "health-events-analyzer"}}},
-			}}},
-			bson.D{{Key: "$match", Value: matchCriteria}},
-			bson.D{{Key: "$count", Value: "count"}},
-		},
+// handleArrayIndex handles array/slice index navigation
+func handleArrayIndex(value reflect.Value, part, path string) (reflect.Value, error) {
+	if value.Kind() != reflect.Slice && value.Kind() != reflect.Array {
+		return reflect.Value{}, fmt.Errorf("cannot navigate path %s: %s is not a slice/array", path, part)
 	}
+
+	index := parseIndex(part)
+	if index < 0 || index >= value.Len() {
+		return reflect.Value{}, fmt.Errorf("index %s out of bounds in path %s", part, path)
+	}
+
+	return value.Index(index), nil
 }
 
-func getPipeline(facets bson.D, rule config.HealthEventsAnalyzerRule) mongo.Pipeline {
-	return mongo.Pipeline{
-		{{Key: "$facet", Value: facets}},
-		{{Key: "$project", Value: bson.D{
-			{Key: "ruleMatched", Value: bson.D{
-				{Key: "$and", Value: func() bson.A {
-					conditions := make(bson.A, len(rule.Sequence))
-					for i, seq := range rule.Sequence {
-						facetName := "sequence_" + strconv.Itoa(i)
-						conditions[i] = bson.D{
-							{Key: "$gte", Value: bson.A{
-								bson.D{{Key: "$arrayElemAt", Value: bson.A{"$" + facetName + ".count", 0}}},
-								seq.ErrorCount,
-							}},
-						}
-					}
-
-					return conditions
-				}()},
-			}},
-		}}},
+// navigateStructField navigates to a field within a struct
+func navigateStructField(value reflect.Value, part, path string) (reflect.Value, error) {
+	if value.Kind() != reflect.Struct {
+		return reflect.Value{}, fmt.Errorf("cannot navigate path %s: %s is not a struct", path, part)
 	}
+
+	// Find field by name (case insensitive)
+	structType := value.Type()
+	for i := 0; i < value.NumField(); i++ {
+		field := structType.Field(i)
+		if strings.EqualFold(field.Name, part) {
+			return value.Field(i), nil
+		}
+	}
+
+	return reflect.Value{}, fmt.Errorf("field %s not found in path %s", part, path)
+}
+
+// isNumericIndex checks if a string represents a numeric array index
+func isNumericIndex(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// parseIndex converts a string to an integer index
+func parseIndex(s string) int {
+	result := 0
+	for _, r := range s {
+		result = result*10 + int(r-'0')
+	}
+
+	return result
 }

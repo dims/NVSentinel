@@ -16,6 +16,7 @@ package reconciler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -28,9 +29,10 @@ import (
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/informers"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/metrics"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/queue"
-	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
+	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
 
-	"go.mongodb.org/mongo-driver/bson"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -42,10 +44,12 @@ type Reconciler struct {
 	informers           *informers.Informers
 	evaluator           evaluator.DrainEvaluator
 	kubernetesClient    kubernetes.Interface
+	databaseClient      queue.DataStore
 }
 
 func NewReconciler(cfg config.ReconcilerConfig,
-	dryRunEnabled bool, kubeClient kubernetes.Interface, informersInstance *informers.Informers) *Reconciler {
+	dryRunEnabled bool, kubeClient kubernetes.Interface, informersInstance *informers.Informers,
+	databaseClient queue.DataStore) *Reconciler {
 	queueManager := queue.NewEventQueueManager()
 	drainEvaluator := evaluator.NewNodeDrainEvaluator(cfg.TomlConfig, informersInstance)
 
@@ -57,9 +61,10 @@ func NewReconciler(cfg config.ReconcilerConfig,
 		informers:           informersInstance,
 		evaluator:           drainEvaluator,
 		kubernetesClient:    kubeClient,
+		databaseClient:      databaseClient,
 	}
 
-	queueManager.SetEventProcessor(reconciler)
+	queueManager.SetDataStoreEventProcessor(reconciler)
 
 	return reconciler
 }
@@ -72,23 +77,114 @@ func (r *Reconciler) Shutdown() {
 	r.queueManager.Shutdown()
 }
 
-func (r *Reconciler) ProcessEvent(ctx context.Context,
-	event bson.M, collection queue.MongoCollectionAPI, nodeName string) error {
+// PreprocessAndEnqueueEvent preprocesses an event from the change stream before enqueueing it.
+// This function:
+// 1. Extracts and unmarshals the health event
+// 2. Skips events already in terminal status
+// 3. Sets the initial status to InProgress (idempotent - only updates if not already set)
+// 4. Enqueues the event to the processing queue
+//
+// This matches the behavior of the main branch's mongodb/event_watcher.go:preprocessAndEnqueueEvent
+func (r *Reconciler) PreprocessAndEnqueueEvent(ctx context.Context, event client.Event) error {
+	// Unmarshal the full document
+	var document map[string]interface{}
+	if err := event.UnmarshalDocument(&document); err != nil {
+		return fmt.Errorf("failed to unmarshal event document: %w", err)
+	}
+
+	// Extract health event with status
+	healthEventWithStatus := model.HealthEventWithStatus{}
+	if err := unmarshalGenericEvent(document, &healthEventWithStatus); err != nil {
+		return fmt.Errorf("failed to extract health event with status: %w", err)
+	}
+
+	// Skip if already in terminal state
+	if isTerminalStatus(healthEventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Status) {
+		slog.Debug("Skipping event - already in terminal state",
+			"node", healthEventWithStatus.HealthEvent.NodeName,
+			"status", healthEventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Status)
+
+		return nil
+	}
+
+	nodeName := healthEventWithStatus.HealthEvent.NodeName
+
+	// Extract the actual _id from the document (preserves its native type - ObjectID for MongoDB)
+	documentID, err := utils.ExtractDocumentIDNative(document)
+	if err != nil {
+		return fmt.Errorf("failed to extract document ID: %w", err)
+	}
+
+	// Set initial status to StatusInProgress (idempotent - only updates if not already set)
+	// Use the actual _id value (preserving its type) for the filter
+	filter := map[string]interface{}{
+		"_id": documentID,
+		"healtheventstatus.userpodsevictionstatus.status": map[string]interface{}{
+			"$ne": string(model.StatusInProgress),
+		},
+	}
+
+	update := map[string]interface{}{
+		"$set": map[string]interface{}{
+			"healtheventstatus.userpodsevictionstatus.status": string(model.StatusInProgress),
+		},
+	}
+
+	result, err := r.databaseClient.UpdateDocument(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to update initial status: %w", err)
+	}
+
+	switch {
+	case result.ModifiedCount > 0:
+		slog.Info("Set initial eviction status to InProgress", "node", nodeName)
+	case result.MatchedCount == 0:
+		slog.Warn("No document matched for status update", "node", nodeName, "documentID", fmt.Sprintf("%v", documentID))
+	default:
+		slog.Debug("Status already set to InProgress", "node", nodeName, "documentID", fmt.Sprintf("%v", documentID))
+	}
+
+	// Enqueue to the queue manager
+	return r.queueManager.EnqueueEventGeneric(ctx, nodeName, document, r.databaseClient)
+}
+
+// isTerminalStatus checks if a status is terminal (processing should not continue)
+func isTerminalStatus(status model.Status) bool {
+	return status == model.StatusSucceeded ||
+		status == model.StatusFailed ||
+		status == model.AlreadyDrained
+}
+
+// unmarshalGenericEvent converts a generic map to a specific struct using JSON marshaling
+func unmarshalGenericEvent(event map[string]interface{}, target interface{}) error {
+	jsonBytes, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event to JSON: %w", err)
+	}
+
+	if err := json.Unmarshal(jsonBytes, target); err != nil {
+		return fmt.Errorf("failed to unmarshal JSON to target type: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Reconciler) ProcessEventGeneric(ctx context.Context,
+	event datastore.Event, database queue.DataStore, nodeName string) error {
 	start := time.Now()
 
 	defer func() {
 		metrics.EventHandlingDuration.Observe(time.Since(start).Seconds())
 	}()
 
-	healthEventWithStatus := model.HealthEventWithStatus{}
-	if err := storewatcher.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus); err != nil {
-		metrics.ProcessingErrors.WithLabelValues("unmarshal_error", nodeName).Inc()
-		return fmt.Errorf("failed to unmarshal health event: %w", err)
+	healthEventWithStatus, err := r.parseHealthEventFromEvent(event, nodeName)
+	if err != nil {
+		return err
 	}
 
 	metrics.TotalEventsReceived.Inc()
 
-	actionResult, err := r.evaluator.EvaluateEvent(ctx, healthEventWithStatus, collection)
+	actionResult, err := r.evaluator.EvaluateEventWithDatabase(ctx, healthEventWithStatus, database)
 	if err != nil {
 		metrics.ProcessingErrors.WithLabelValues("evaluate_event_error", nodeName).Inc()
 		return fmt.Errorf("failed to evaluate event: %w", err)
@@ -98,16 +194,16 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 		"node", nodeName,
 		"action", actionResult.Action.String())
 
-	return r.executeAction(ctx, actionResult, healthEventWithStatus, event, collection)
+	return r.executeAction(ctx, actionResult, healthEventWithStatus, event, database)
 }
 
 func (r *Reconciler) executeAction(ctx context.Context, action *evaluator.DrainActionResult,
-	healthEvent model.HealthEventWithStatus, event bson.M, collection queue.MongoCollectionAPI) error {
+	healthEvent model.HealthEventWithStatus, event datastore.Event, database queue.DataStore) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 
 	switch action.Action {
 	case evaluator.ActionSkip:
-		return r.executeSkip(ctx, nodeName, healthEvent, event, collection)
+		return r.executeSkip(ctx, nodeName, healthEvent, event, database)
 
 	case evaluator.ActionWait:
 		slog.Info("Waiting for node",
@@ -125,14 +221,16 @@ func (r *Reconciler) executeAction(ctx context.Context, action *evaluator.DrainA
 		return r.executeTimeoutEviction(ctx, action, healthEvent)
 
 	case evaluator.ActionCheckCompletion:
+		slog.Debug("Executing ActionCheckCompletion", "node", nodeName)
 		r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, true)
+
 		return r.executeCheckCompletion(ctx, action, healthEvent)
 
 	case evaluator.ActionMarkAlreadyDrained:
-		return r.executeMarkAlreadyDrained(ctx, healthEvent, event, collection)
+		return r.executeMarkAlreadyDrained(ctx, healthEvent, event, database)
 
 	case evaluator.ActionUpdateStatus:
-		return r.executeUpdateStatus(ctx, healthEvent, event, collection)
+		return r.executeUpdateStatus(ctx, healthEvent, event, database)
 
 	default:
 		return fmt.Errorf("unknown action: %s", action.Action.String())
@@ -141,7 +239,7 @@ func (r *Reconciler) executeAction(ctx context.Context, action *evaluator.DrainA
 
 func (r *Reconciler) executeSkip(ctx context.Context,
 	nodeName string, healthEvent model.HealthEventWithStatus,
-	event bson.M, collection queue.MongoCollectionAPI) error {
+	event datastore.Event, database queue.DataStore) error {
 	slog.Info("Skipping event for node", "node", nodeName)
 
 	// Update MongoDB status to StatusSucceeded for healthy events that cancel draining
@@ -151,7 +249,7 @@ func (r *Reconciler) executeSkip(ctx context.Context,
 		podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
 		podsEvictionStatus.Status = model.StatusSucceeded
 
-		if err := r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus, nodeName,
+		if err := r.updateNodeUserPodsEvictedStatus(ctx, database, event, podsEvictionStatus, nodeName,
 			metrics.DrainStatusCancelled); err != nil {
 			slog.Error("Failed to update MongoDB status for node",
 				"node", nodeName,
@@ -200,6 +298,7 @@ func (r *Reconciler) executeTimeoutEviction(ctx context.Context,
 func (r *Reconciler) executeCheckCompletion(ctx context.Context,
 	action *evaluator.DrainActionResult, healthEvent model.HealthEventWithStatus) error {
 	nodeName := healthEvent.HealthEvent.NodeName
+
 	allPodsComplete := true
 
 	var remainingPods []string
@@ -243,17 +342,17 @@ func (r *Reconciler) executeCheckCompletion(ctx context.Context,
 }
 
 func (r *Reconciler) executeMarkAlreadyDrained(ctx context.Context,
-	healthEvent model.HealthEventWithStatus, event bson.M, collection queue.MongoCollectionAPI) error {
+	healthEvent model.HealthEventWithStatus, event datastore.Event, database queue.DataStore) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 	podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
 	podsEvictionStatus.Status = model.AlreadyDrained
 
-	return r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus,
+	return r.updateNodeUserPodsEvictedStatus(ctx, database, event, podsEvictionStatus,
 		nodeName, metrics.DrainStatusSkipped)
 }
 
 func (r *Reconciler) executeUpdateStatus(ctx context.Context,
-	healthEvent model.HealthEventWithStatus, event bson.M, collection queue.MongoCollectionAPI) error {
+	healthEvent model.HealthEventWithStatus, event datastore.Event, database queue.DataStore) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 	podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
 	podsEvictionStatus.Status = model.StatusSucceeded
@@ -266,7 +365,7 @@ func (r *Reconciler) executeUpdateStatus(ctx context.Context,
 		metrics.ProcessingErrors.WithLabelValues("label_update_error", nodeName).Inc()
 	}
 
-	err := r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus,
+	err := r.updateNodeUserPodsEvictedStatus(ctx, database, event, podsEvictionStatus,
 		nodeName, metrics.DrainStatusDrained)
 	if err != nil {
 		return fmt.Errorf("failed to update user pod eviction status: %w", err)
@@ -305,30 +404,60 @@ func (r *Reconciler) updateNodeDrainStatus(ctx context.Context,
 	}
 }
 
-func (r *Reconciler) updateNodeUserPodsEvictedStatus(ctx context.Context, collection queue.MongoCollectionAPI,
-	event bson.M, userPodsEvictionStatus *model.OperationStatus, nodeName string, drainStatus string) error {
-	document, ok := event["fullDocument"].(bson.M)
-	if !ok {
-		return fmt.Errorf("error extracting fullDocument from event: %+v", event)
+func (r *Reconciler) updateNodeUserPodsEvictedStatus(ctx context.Context, database queue.DataStore,
+	event datastore.Event, userPodsEvictionStatus *model.OperationStatus,
+	nodeName string, drainStatus string) error {
+	// Extract the document ID (preserving native type for MongoDB)
+	documentID, err := utils.ExtractDocumentIDNative(event)
+	if err != nil {
+		return fmt.Errorf("failed to extract document ID: %w", err)
 	}
 
-	filter := bson.M{"_id": document["_id"]}
-	update := bson.M{
-		"$set": bson.M{
+	filter := map[string]interface{}{"_id": documentID}
+	update := map[string]interface{}{
+		"$set": map[string]interface{}{
 			"healtheventstatus.userpodsevictionstatus": *userPodsEvictionStatus,
 		},
 	}
 
-	_, err := collection.UpdateOne(ctx, filter, update)
+	_, err = database.UpdateDocument(ctx, filter, update)
 	if err != nil {
 		metrics.ProcessingErrors.WithLabelValues("update_status_error", nodeName).Inc()
-		return fmt.Errorf("error updating document with ID: %v, error: %w", document["_id"], err)
+		return fmt.Errorf("error updating document with ID: %v, error: %w", documentID, err)
 	}
 
 	slog.Info("Health event status has been updated",
-		"documentID", document["_id"],
+		"documentID", documentID,
 		"evictionStatus", userPodsEvictionStatus.Status)
 	metrics.EventsProcessed.WithLabelValues(drainStatus, nodeName).Inc()
 
 	return nil
+}
+
+// parseHealthEventFromEvent extracts and parses health event from a document
+// The event parameter is already the fullDocument extracted from the change stream
+func (r *Reconciler) parseHealthEventFromEvent(event datastore.Event,
+	nodeName string) (model.HealthEventWithStatus, error) {
+	var healthEventWithStatus model.HealthEventWithStatus
+
+	// The event is already the fullDocument (extracted in main.go)
+	// Convert to JSON and then marshal/unmarshal to get proper structure
+	jsonBytes, err := json.Marshal(event)
+	if err != nil {
+		metrics.ProcessingErrors.WithLabelValues("marshal_error", nodeName).Inc()
+		return healthEventWithStatus, fmt.Errorf("failed to marshal document: %w", err)
+	}
+
+	if err := json.Unmarshal(jsonBytes, &healthEventWithStatus); err != nil {
+		metrics.ProcessingErrors.WithLabelValues("unmarshal_error", nodeName).Inc()
+		return healthEventWithStatus, fmt.Errorf("failed to unmarshal health event: %w", err)
+	}
+
+	// Safety check - ensure HealthEvent is not nil
+	if healthEventWithStatus.HealthEvent == nil {
+		metrics.ProcessingErrors.WithLabelValues("unmarshal_error", nodeName).Inc()
+		return healthEventWithStatus, fmt.Errorf("health event is nil after unmarshaling")
+	}
+
+	return healthEventWithStatus, nil
 }
