@@ -149,7 +149,7 @@ func (p *QueueEventProcessor) ingestEvents(ctx context.Context) {
 			if err := event.UnmarshalDocument(&healthEventWithStatus); err != nil {
 				slog.Error("Failed to unmarshal event, skipping", "error", err)
 				// Still mark as processed to avoid stuck streams
-				if markErr := p.changeStreamWatcher.MarkProcessed(ctx); markErr != nil {
+				if markErr := p.changeStreamWatcher.MarkProcessed(ctx, []byte{}); markErr != nil {
 					slog.Error("Failed to mark failed event as processed", "error", markErr)
 				}
 
@@ -160,7 +160,7 @@ func (p *QueueEventProcessor) ingestEvents(ctx context.Context) {
 			if err != nil {
 				slog.Error("Failed to get document ID, skipping event", "error", err)
 				// Still mark as processed
-				if markErr := p.changeStreamWatcher.MarkProcessed(ctx); markErr != nil {
+				if markErr := p.changeStreamWatcher.MarkProcessed(ctx, []byte{}); markErr != nil {
 					slog.Error("Failed to mark event as processed", "error", markErr)
 				}
 
@@ -252,7 +252,7 @@ func (p *QueueEventProcessor) processQueuedEvent(ctx context.Context, queuedEven
 
 	// Always mark as processed in the change stream to advance resume token
 	// This prevents the change stream from getting stuck on failed events
-	if markErr := p.changeStreamWatcher.MarkProcessed(ctx); markErr != nil {
+	if markErr := p.changeStreamWatcher.MarkProcessed(ctx, []byte{}); markErr != nil {
 		slog.Error("Failed to mark event as processed in change stream",
 			"eventID", queuedEvent.EventID,
 			"error", markErr)

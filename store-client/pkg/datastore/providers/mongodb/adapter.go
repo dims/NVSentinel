@@ -208,7 +208,7 @@ func (a *AdaptedChangeStreamWatcher) Start(ctx context.Context) {
 
 // MarkProcessed marks events as processed
 func (a *AdaptedChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
-	return a.watcher.MarkProcessed(ctx)
+	return a.watcher.MarkProcessed(ctx, token)
 }
 
 // Close closes the watcher

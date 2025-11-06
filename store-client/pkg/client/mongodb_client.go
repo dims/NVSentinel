@@ -811,8 +811,8 @@ func (w *mongoChangeStreamWatcher) Events() <-chan Event {
 	return eventChan
 }
 
-func (w *mongoChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
-	return w.watcher.MarkProcessed(ctx)
+func (w *mongoChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
+	return w.watcher.MarkProcessed(ctx, token)
 }
 
 func (w *mongoChangeStreamWatcher) GetUnprocessedEventCount(ctx context.Context,

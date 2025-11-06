@@ -123,6 +123,7 @@ func (p *DefaultEventProcessor) processEvents(ctx context.Context) error {
 
 	for {
 		slog.Info("Event processor waiting for next event", "eventsProcessedSoFar", eventCount)
+
 		select {
 		case <-ctx.Done():
 			slog.Info("Context cancelled, stopping event processor", "totalEventsProcessed", eventCount)
@@ -208,7 +209,8 @@ func (p *DefaultEventProcessor) handleSingleEvent(ctx context.Context, event Eve
 	}
 
 	// Always mark as processed to advance the resume token
-	if err := p.changeStreamWatcher.MarkProcessed(ctx); err != nil {
+	// Note: Passing empty token allows MongoDB watcher to use its internal cursor state
+	if err := p.changeStreamWatcher.MarkProcessed(ctx, []byte{}); err != nil {
 		p.updateMetrics("mark_processed_error", eventID, time.Since(startTime), false)
 		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}

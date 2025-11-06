@@ -30,7 +30,7 @@ type FakeChangeStreamWatcher struct {
 
 	// Function fields allow customization of mock behavior
 	StartFn                    func(ctx context.Context)
-	MarkProcessedFn            func(ctx context.Context) error
+	MarkProcessedFn            func(ctx context.Context, token []byte) error
 	CloseFn                    func(ctx context.Context) error
 	GetUnprocessedEventCountFn func(ctx context.Context, lastProcessedID primitive.ObjectID,
 		additionalFilters ...bson.M) (int64, error)
@@ -59,7 +59,7 @@ func NewFakeChangeStreamWatcher() *FakeChangeStreamWatcher {
 		StartFn: func(ctx context.Context) {
 			// Default: no-op
 		},
-		MarkProcessedFn: func(ctx context.Context) error {
+		MarkProcessedFn: func(ctx context.Context, token []byte) error {
 			// Default: succeed
 			return nil
 		},
@@ -92,7 +92,7 @@ func (m *FakeChangeStreamWatcher) Start(ctx context.Context) {
 }
 
 // MarkProcessed executes the configured MarkProcessed function and tracks the call.
-func (m *FakeChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
+func (m *FakeChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -100,7 +100,7 @@ func (m *FakeChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 	m.LastMarkProcessedCtx = ctx
 
 	if m.MarkProcessedFn != nil {
-		return m.MarkProcessedFn(ctx)
+		return m.MarkProcessedFn(ctx, token)
 	}
 
 	return nil

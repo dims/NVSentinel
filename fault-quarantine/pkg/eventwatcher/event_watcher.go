@@ -120,7 +120,7 @@ func (w *EventWatcher) watchEvents(ctx context.Context) error {
 			slog.Error("Event processing failed, but still marking as processed to proceed ahead", "error", processErr)
 		}
 
-		if err := w.changeStreamWatcher.MarkProcessed(ctx); err != nil {
+		if err := w.changeStreamWatcher.MarkProcessed(ctx, []byte{}); err != nil {
 			metrics.ProcessingErrors.WithLabelValues("mark_processed_error").Inc()
 			slog.Error("Error updating resume token", "error", err)
 

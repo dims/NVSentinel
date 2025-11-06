@@ -210,11 +210,12 @@ func startEventWatcher(ctx context.Context, components *initializer.Components, 
 				continue
 			}
 
-			// Mark the event as processed (save resume token) AFTER successful preprocessing
-			if err := components.EventWatcher.MarkProcessed(ctx); err != nil {
-				// Don't send to criticalError - just log and continue
-				slog.Error("Error updating resume token", "error", err)
-			}
+		// Mark the event as processed (save resume token) AFTER successful preprocessing
+		// Note: Passing empty token allows MongoDB watcher to use its internal cursor state
+		if err := components.EventWatcher.MarkProcessed(ctx, []byte{}); err != nil {
+			// Don't send to criticalError - just log and continue
+			slog.Error("Error updating resume token", "error", err)
+		}
 		}
 
 		slog.Info("Event watcher stopped")

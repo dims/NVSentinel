@@ -40,7 +40,7 @@ func (m *MockChangeStreamWatcher) Events() <-chan client.Event {
 	return m.EventsChan
 }
 
-func (m *MockChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
+func (m *MockChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
 	return nil
 }
 

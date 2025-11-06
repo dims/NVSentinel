@@ -249,7 +249,7 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 			t.Fatal("timeout waiting for event")
 		}
 
-		err = watcher.MarkProcessed(ctx)
+		err = watcher.MarkProcessed(ctx, []byte{})
 		require.NoError(t, err)
 
 		// Verify the UpdateOne command was called once
@@ -334,7 +334,7 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 			t.Fatal("timeout waiting for event")
 		}
 
-		err = watcher.MarkProcessed(ctx)
+		err = watcher.MarkProcessed(ctx, []byte{})
 		require.NoError(t, err)
 
 		// Verify the UpdateOne command was called twice
@@ -402,7 +402,7 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 			t.Fatal("timeout waiting for event")
 		}
 
-		err = watcher.MarkProcessed(ctx)
+		err = watcher.MarkProcessed(ctx, []byte{})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "retrying storing resume token for client testclient-timeout timed out")
 		require.Contains(t, err.Error(), "persistent network error 5")

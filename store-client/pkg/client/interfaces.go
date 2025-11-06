@@ -73,7 +73,7 @@ type Event interface {
 type ChangeStreamWatcher interface {
 	Start(ctx context.Context)
 	Events() <-chan Event
-	MarkProcessed(ctx context.Context) error
+	MarkProcessed(ctx context.Context, token []byte) error
 	Close(ctx context.Context) error
 }
 
