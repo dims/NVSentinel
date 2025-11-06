@@ -22,6 +22,7 @@ import (
 // This interface abstracts common database operations to allow for different database implementations
 type DatabaseClient interface {
 	// Document operations
+	InsertMany(ctx context.Context, documents []interface{}) (*InsertManyResult, error)
 	UpdateDocumentStatus(ctx context.Context, documentID string, statusPath string, status interface{}) error
 	UpdateDocument(ctx context.Context, filter interface{}, update interface{}) (*UpdateResult, error)
 	UpsertDocument(ctx context.Context, filter interface{}, document interface{}) (*UpdateResult, error)
@@ -66,6 +67,7 @@ type SessionContext interface {
 type Event interface {
 	GetDocumentID() (string, error)
 	GetNodeName() (string, error)
+	GetResumeToken() []byte
 	UnmarshalDocument(v interface{}) error
 }
 
@@ -91,6 +93,11 @@ type TokenConfig struct {
 }
 
 // Result types - these wrap the underlying database results to provide consistent interfaces
+
+// InsertManyResult represents the result of an insert many operation
+type InsertManyResult struct {
+	InsertedIDs []interface{}
+}
 
 // UpdateResult represents the result of an update operation
 type UpdateResult struct {

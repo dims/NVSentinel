@@ -100,8 +100,9 @@ func NewDatastoreClient(ctx context.Context, config DatastoreClientConfig) (*Dat
 	}
 
 	// Create change stream watcher if pipeline is provided
+	// CRITICAL: Pass the SAME database client to avoid creating duplicate clients with different channels!
 	if config.Pipeline != nil {
-		changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, config.ModuleName, config.Pipeline)
+		changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, databaseClient, config.ModuleName, config.Pipeline)
 		if err != nil {
 			// Clean up database client on failure
 			databaseClient.Close(ctx)

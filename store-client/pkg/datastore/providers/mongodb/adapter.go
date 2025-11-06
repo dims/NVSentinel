@@ -152,7 +152,8 @@ func (a *AdaptedMongoStore) CreateChangeStreamWatcher(ctx context.Context, clien
 		tokenConfig.TokenCollection = tokenColl
 	}
 
-	watcher, err := a.factory.CreateChangeStreamWatcher(ctx, clientName, pipeline)
+	// CRITICAL: Pass the existing databaseClient to avoid creating duplicate clients
+	watcher, err := a.factory.CreateChangeStreamWatcher(ctx, a.databaseClient, clientName, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create change stream watcher: %w", err)
 	}

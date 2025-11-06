@@ -110,7 +110,8 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 	reconciler := initializeReconciler(reconcilerCfg, params.DryRun, clientSet, informersInstance, databaseClient)
 	queueManager := reconciler.GetQueueManager()
 
-	changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, "node-drainer", pipeline)
+	// CRITICAL: Pass the existing databaseClient to avoid creating duplicate clients
+	changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, databaseClient, "node-drainer", pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create change stream watcher: %w", err)
 	}

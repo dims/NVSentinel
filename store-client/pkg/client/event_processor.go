@@ -119,41 +119,26 @@ func (p *DefaultEventProcessor) Stop(ctx context.Context) error {
 func (p *DefaultEventProcessor) processEvents(ctx context.Context) error {
 	slog.Info("Listening for events on the channel...")
 
-	eventCount := 0
-
 	for {
-		slog.Info("Event processor waiting for next event", "eventsProcessedSoFar", eventCount)
-
 		select {
 		case <-ctx.Done():
-			slog.Info("Context cancelled, stopping event processor", "totalEventsProcessed", eventCount)
+			slog.Info("Context cancelled, stopping event processor")
 			return ctx.Err()
 		case <-p.stopCh:
-			slog.Info("Stop signal received, shutting down event processor", "totalEventsProcessed", eventCount)
+			slog.Info("Stop signal received, shutting down event processor")
 			return nil
 		case event, ok := <-p.changeStreamWatcher.Events():
 			if !ok {
-				slog.Info("Event channel closed, stopping processor", "totalEventsProcessed", eventCount)
+				slog.Info("Event channel closed, stopping processor")
 				return nil
 			}
 
-			eventCount++
-
 			eventID, _ := event.GetDocumentID()
-			slog.Info("Event processor RECEIVED event from channel",
-				"eventNumber", eventCount,
-				"eventID", eventID)
+			slog.Debug("Processing event", "eventID", eventID)
 
 			if err := p.handleSingleEvent(ctx, event); err != nil {
-				slog.Error("Failed to handle event",
-					"eventNumber", eventCount,
-					"eventID", eventID,
-					"error", err)
+				slog.Error("Failed to handle event", "eventID", eventID, "error", err)
 			}
-
-			slog.Info("Event processor finished handling event, ready for next",
-				"eventNumber", eventCount,
-				"eventID", eventID)
 		}
 	}
 }

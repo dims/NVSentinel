@@ -216,11 +216,14 @@ func openChangeStream(
 			retryDeadlineSeconds, retryIntervalSeconds)
 	}
 
-	// No resume token, open on SecondaryPreferred directly
-	collSP := client.Database(mongoConfig.Database).Collection(
-		mongoConfig.Collection, options.Collection().SetReadPreference(readpref.SecondaryPreferred()))
+	// No resume token, open on Primary for immediate event delivery
+	// Using Primary read preference ensures change streams work correctly even when:
+	// 1. There are no secondary nodes in the replica set
+	// 2. We need guaranteed low-latency event delivery
+	collP := client.Database(mongoConfig.Database).Collection(
+		mongoConfig.Collection, options.Collection().SetReadPreference(readpref.Primary()))
 
-	cs, err := collSP.Watch(ctx, pipeline, opts)
+	cs, err := collP.Watch(ctx, pipeline, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start change stream: %w", err)
 	}
@@ -228,8 +231,8 @@ func openChangeStream(
 	return cs, nil
 }
 
-// openChangeStreamWithRetry attempts to open a change stream with retries on SecondaryPreferred
-// before falling back to Primary. This is used when resuming from a stored token.
+// openChangeStreamWithRetry attempts to open a change stream with retries on Primary.
+// This is used when resuming from a stored token.
 func openChangeStreamWithRetry(
 	ctx context.Context,
 	client *mongo.Client,
@@ -239,14 +242,15 @@ func openChangeStreamWithRetry(
 	retryDeadlineSeconds int,
 	retryIntervalSeconds int,
 ) (*mongo.ChangeStream, error) {
-	// Try SecondaryPreferred first with bounded retries
-	collSP := client.Database(mongoConfig.Database).Collection(
-		mongoConfig.Collection, options.Collection().SetReadPreference(readpref.SecondaryPreferred()))
+	// Use Primary read preference for reliable event delivery
+	// This ensures change streams work correctly even with single-node replica sets
+	collP := client.Database(mongoConfig.Database).Collection(
+		mongoConfig.Collection, options.Collection().SetReadPreference(readpref.Primary()))
 
 	deadline := time.Now().Add(time.Duration(retryDeadlineSeconds) * time.Second)
 
 	for {
-		cs, openErr := collSP.Watch(ctx, pipeline, opts)
+		cs, openErr := collP.Watch(ctx, pipeline, opts)
 		if openErr == nil {
 			return cs, nil
 		}
@@ -257,22 +261,11 @@ func openChangeStreamWithRetry(
 		}
 
 		if time.Now().After(deadline) {
-			slog.Warn("Change stream open on SecondaryPreferred failed, falling back to Primary",
-				"retryDeadlineSeconds", retryDeadlineSeconds,
-				"error", openErr)
-
-			collP := client.Database(mongoConfig.Database).Collection(
-				mongoConfig.Collection, options.Collection().SetReadPreference(readpref.Primary()))
-
-			cs, err := collP.Watch(ctx, pipeline, opts)
-			if err != nil {
-				return nil, fmt.Errorf("failed to start change stream on primary after retries: %w", err)
-			}
-
-			return cs, nil
+			return nil, fmt.Errorf("failed to start change stream on primary after retries (deadline %ds): %w",
+				retryDeadlineSeconds, openErr)
 		}
 
-		slog.Warn("Failed to open change stream on SecondaryPreferred while resuming, retrying",
+		slog.Warn("Failed to open change stream on Primary while resuming, retrying",
 			"retryIntervalSeconds", retryIntervalSeconds,
 			"error", openErr)
 
@@ -286,21 +279,33 @@ func openChangeStreamWithRetry(
 }
 
 func (w *ChangeStreamWatcher) Start(ctx context.Context) {
-	// Start a monitoring goroutine to track channel health
-	go w.runChannelMonitor(ctx)
-
 	go func(ctx context.Context) {
 		defer w.closeOnce.Do(func() {
 			close(w.eventChannel)
 			slog.Info("ChangeStreamWatcher event channel closed", "client", w.clientName)
 		})
 
+		eventCount := 0
+		lastHeartbeat := time.Now()
+		heartbeatInterval := 10 * time.Second
+		
 		for {
 			select {
 			case <-ctx.Done():
-				slog.Info("ChangeStreamWatcher context cancelled, stopping event processing", "client", w.clientName)
+				slog.Info("ChangeStreamWatcher context cancelled, stopping event processing",
+					"client", w.clientName,
+					"totalEventsProcessed", eventCount)
 				return
 			default:
+				// Periodic heartbeat log
+				if time.Since(lastHeartbeat) > heartbeatInterval {
+					slog.Info("[DEBUG-WATCHER] Heartbeat: watcher still running",
+						"client", w.clientName,
+						"eventsProcessed", eventCount,
+						"channelAddr", fmt.Sprintf("%p", &w.eventChannel))
+					lastHeartbeat = time.Now()
+				}
+				
 				w.mu.Lock()
 				hasNext := w.changeStream.Next(ctx)
 				csErr := w.changeStream.Err()
@@ -308,98 +313,95 @@ func (w *ChangeStreamWatcher) Start(ctx context.Context) {
 
 				switch {
 				case hasNext:
+					eventCount++
+					slog.Info("[DEBUG-WATCHER] MongoDB changeStream.Next() returned TRUE",
+						"client", w.clientName,
+						"eventNumber", eventCount,
+						"database", w.database,
+						"collection", w.collection)
+					
 					if err := w.processChangeStreamEvent(ctx); err != nil {
 						slog.Error("Failed to process change stream event", "client", w.clientName, "error", err)
 						continue
 					}
 				case csErr != nil:
 					slog.Error("Failed to watch change stream", "client", w.clientName, "error", csErr)
-				default:
-					// No event available, but no error - this is normal, just waiting
-					slog.Debug("Change stream waiting for next event", "client", w.clientName)
 				}
 			}
 		}
 	}(ctx)
 }
 
-// runChannelMonitor runs the channel health monitoring in a separate goroutine
-func (w *ChangeStreamWatcher) runChannelMonitor(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("Channel monitor stopping", "client", w.clientName)
-			return
-		case <-ticker.C:
-			channelLen := len(w.eventChannel)
-			channelCap := cap(w.eventChannel)
-			slog.Info("Channel health check",
-				"client", w.clientName,
-				"queuedEvents", channelLen,
-				"capacity", channelCap,
-				"utilization", fmt.Sprintf("%.1f%%", float64(channelLen)/float64(max(channelCap, 1))*100))
-		}
-	}
-}
-
 // processChangeStreamEvent handles the processing of a single change stream event
+// CRITICAL: Must capture resume token BEFORE next Next() call to avoid race condition!
 func (w *ChangeStreamWatcher) processChangeStreamEvent(ctx context.Context) error {
 	var event bson.M
 
 	w.mu.Lock()
 	err := w.changeStream.Decode(&event)
+	// Capture resume token immediately after decode, before unlocking
+	// This ensures we get the token for THIS event, not a future one
+	resumeToken := w.changeStream.ResumeToken()
 	w.mu.Unlock()
 
 	if err != nil {
 		return fmt.Errorf("failed to decode change stream event: %w", err)
 	}
 
-	// Extract event metadata for logging
-	operationType := "unknown"
-	if opType, ok := event["operationType"].(string); ok {
-		operationType = opType
+	// DEBUG: Log the event immediately after decode from MongoDB
+	opType := "unknown"
+	if ot, ok := event["operationType"].(string); ok {
+		opType = ot
 	}
-
-	documentID := "unknown"
-
+	docID := "unknown"
 	if fullDoc, ok := event["fullDocument"].(bson.M); ok {
 		if id, ok := fullDoc["_id"]; ok {
-			documentID = fmt.Sprintf("%v", id)
+			docID = fmt.Sprintf("%v", id)
+		}
+	}
+	nodeName := "unknown"
+	if fullDoc, ok := event["fullDocument"].(bson.M); ok {
+		if he, ok := fullDoc["healthevent"].(bson.M); ok {
+			if nn, ok := he["nodename"].(string); ok {
+				nodeName = nn
+			}
 		}
 	}
 
-	slog.Info("Change stream event received",
+	slog.Info("[DEBUG-WATCHER] RAW EVENT FROM MONGODB",
 		"client", w.clientName,
-		"operationType", operationType,
-		"documentID", documentID,
-		"hasFullDocument", event["fullDocument"] != nil,
-		"contextDone", ctx.Err() != nil)
+		"operationType", opType,
+		"documentID", docID,
+		"nodeName", nodeName,
+		"database", w.database,
+		"collection", w.collection)
+
+	// Store the resume token in the event itself so consumer can use it
+	// MongoDB change stream events have a special _id field that contains the resume token
+	// But we also add it explicitly to ensure it's available
+	event["_resumeToken"] = resumeToken
 
 	// Convert MongoDB-specific bson.M to database-agnostic Event type
 	genericEvent := Event(event)
 
-	slog.Info("Attempting to send event to channel",
+	slog.Info("[DEBUG-WATCHER] ABOUT TO SEND TO CHANNEL",
 		"client", w.clientName,
-		"documentID", documentID,
-		"channelCapacity", cap(w.eventChannel),
-		"channelLength", len(w.eventChannel))
+		"documentID", docID,
+		"nodeName", nodeName)
 
 	// Use blocking send to guarantee delivery (like main branch)
 	// This ensures no events are lost between sender and receiver.
-	// Tradeoff: The goroutine may block here if receiver is not ready,
+	// The goroutine may block here if receiver is not ready,
 	// but this guarantees the event will be delivered once receiver is available.
 	// The context check in the outer select will catch cancellation between events.
 	// Proper shutdown sequence (Close -> close change stream -> close channel) ensures
 	// this goroutine exits cleanly without deadlock.
 	w.eventChannel <- genericEvent
 
-	slog.Info("Change stream event sent to channel",
+	slog.Info("[DEBUG-WATCHER] SENT TO CHANNEL SUCCESSFULLY",
 		"client", w.clientName,
-		"operationType", operationType,
-		"documentID", documentID)
+		"documentID", docID,
+		"nodeName", nodeName)
 
 	return nil
 }

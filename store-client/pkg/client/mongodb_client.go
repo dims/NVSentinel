@@ -120,6 +120,38 @@ func (e *mongoEvent) GetNodeName() (string, error) {
 	return nodeName, nil
 }
 
+func (e *mongoEvent) GetResumeToken() []byte {
+	// Extract the resume token that was captured when the event was received
+	// This token is added by the ChangeStreamWatcher in processChangeStreamEvent
+	token, ok := e.rawEvent["_resumeToken"]
+	if !ok {
+		// If no token was found, return empty (caller will fall back to cursor position)
+		return []byte{}
+	}
+
+	// MongoDB resume tokens can be various types (Binary, string, etc.)
+	// Try to extract as byte array
+	switch v := token.(type) {
+	case []byte:
+		return v
+	case primitive.Binary:
+		return v.Data
+	case bson.RawValue:
+		data, err := bson.Marshal(v)
+		if err == nil {
+			return data
+		}
+	default:
+		// Try to marshal whatever type it is
+		data, err := bson.Marshal(v)
+		if err == nil {
+			return data
+		}
+	}
+
+	return []byte{}
+}
+
 func (e *mongoEvent) UnmarshalDocument(v interface{}) error {
 	// Extract fullDocument from the MongoDB change event
 	fullDocument, ok := e.rawEvent["fullDocument"]
@@ -501,6 +533,22 @@ func (c *MongoDBClient) UpdateDocument(
 		ModifiedCount: result.ModifiedCount,
 		UpsertedCount: result.UpsertedCount,
 		UpsertedID:    result.UpsertedID,
+	}, nil
+}
+
+// InsertMany inserts multiple documents
+func (c *MongoDBClient) InsertMany(ctx context.Context, documents []interface{}) (*InsertManyResult, error) {
+	result, err := c.mongoCol.InsertMany(ctx, documents)
+	if err != nil {
+		return nil, datastore.NewInsertError(
+			datastore.ProviderMongoDB,
+			"failed to insert documents",
+			err,
+		).WithMetadata("count", len(documents))
+	}
+
+	return &InsertManyResult{
+		InsertedIDs: result.InsertedIDs,
 	}, nil
 }
 

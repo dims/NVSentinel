@@ -133,23 +133,22 @@ func (r *DatabaseStoreConnector) insertHealthEvents(
 	healthEvents *protos.HealthEvents,
 ) error {
 	callback := func(sessionContext client.SessionContext) error {
+		// Prepare all documents for batch insertion
+		healthEventWithStatusList := make([]interface{}, 0, len(healthEvents.GetEvents()))
+
 		for _, healthEvent := range healthEvents.GetEvents() {
 			healthEventWithStatusObj := model.HealthEventWithStatus{
 				CreatedAt:   time.Now().UTC(),
 				HealthEvent: healthEvent,
 			}
+			healthEventWithStatusList = append(healthEventWithStatusList, healthEventWithStatusObj)
+		}
 
-			// Insert each document individually using the database-agnostic interface
-			filter := map[string]interface{}{
-				"healthevent.nodename":           healthEvent.NodeName,
-				"healthevent.generatedtimestamp": healthEvent.GeneratedTimestamp,
-				"healthevent.checkname":          healthEvent.CheckName,
-			}
-
-			_, err := r.databaseClient.UpsertDocument(sessionContext, filter, healthEventWithStatusObj)
-			if err != nil {
-				return fmt.Errorf("upsert failed: %w", err)
-			}
+		// Insert all documents in a single batch operation
+		// This ensures MongoDB generates INSERT operations (not UPDATE) for change streams
+		_, err := r.databaseClient.InsertMany(sessionContext, healthEventWithStatusList)
+		if err != nil {
+			return fmt.Errorf("insertMany failed: %w", err)
 		}
 
 		return nil

@@ -109,11 +109,19 @@ func (r *Reconciler) Start(ctx context.Context) error {
 	watcherInstance.Start(ctx)
 	slog.Info("Listening for events on the channel...")
 
+	eventCount := 0
 	for event := range watcherInstance.Events() {
+		eventCount++
+		slog.Info("[DEBUG-RECONCILER] Event pulled from channel",
+			"eventNumber", eventCount,
+			"hasEvent", event.Event != nil,
+			"eventSize", len(event.Event))
+		
 		slog.Info("Event received", "event", event)
 		r.processEvent(ctx, event, watcherInstance, healthEventStore)
 	}
 
+	slog.Info("Channel closed, exiting event loop", "totalEventsProcessed", eventCount)
 	return nil
 }
 

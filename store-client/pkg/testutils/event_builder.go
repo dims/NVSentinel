@@ -116,6 +116,11 @@ func (e *testEvent) GetNodeName() (string, error) {
 	return e.nodeName, nil
 }
 
+func (e *testEvent) GetResumeToken() []byte {
+	// For testing, return an empty token
+	return []byte{}
+}
+
 func (e *testEvent) UnmarshalDocument(v interface{}) error {
 	// Create the health event structure that modules expect
 	healthEvent := &model.HealthEventWithStatus{

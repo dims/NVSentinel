@@ -120,7 +120,10 @@ func (w *EventWatcher) watchEvents(ctx context.Context) error {
 			slog.Error("Event processing failed, but still marking as processed to proceed ahead", "error", processErr)
 		}
 
-		if err := w.changeStreamWatcher.MarkProcessed(ctx, []byte{}); err != nil {
+		// Extract the resume token from the event to avoid race condition
+		// where the change stream cursor advances before we call MarkProcessed
+		resumeToken := event.GetResumeToken()
+		if err := w.changeStreamWatcher.MarkProcessed(ctx, resumeToken); err != nil {
 			metrics.ProcessingErrors.WithLabelValues("mark_processed_error").Inc()
 			slog.Error("Error updating resume token", "error", err)
 

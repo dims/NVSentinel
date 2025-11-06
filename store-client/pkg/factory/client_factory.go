@@ -75,8 +75,10 @@ func (f *ClientFactory) CreateCollectionClient(ctx context.Context) (client.Coll
 }
 
 // CreateChangeStreamWatcher creates a change stream watcher with the given configuration
+// It requires an existing database client to avoid creating duplicate clients
 func (f *ClientFactory) CreateChangeStreamWatcher(
 	ctx context.Context,
+	dbClient client.DatabaseClient,
 	clientName string,
 	pipeline interface{},
 ) (client.ChangeStreamWatcher, error) {
@@ -87,15 +89,6 @@ func (f *ClientFactory) CreateChangeStreamWatcher(
 			"failed to create token configuration",
 			err,
 		).WithMetadata("clientName", clientName)
-	}
-
-	dbClient, err := f.CreateDatabaseClient(ctx)
-	if err != nil {
-		return nil, datastore.NewConnectionError(
-			datastore.ProviderMongoDB,
-			"failed to create database client",
-			err,
-		)
 	}
 
 	// Convert database-agnostic pipeline to MongoDB-specific if needed
@@ -162,7 +155,13 @@ func NewChangeStreamWatcherFromEnv(
 		return nil, err
 	}
 
-	return factory.CreateChangeStreamWatcher(ctx, clientName, pipeline)
+	// Create database client first
+	dbClient, err := factory.CreateDatabaseClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return factory.CreateChangeStreamWatcher(ctx, dbClient, clientName, pipeline)
 }
 
 // Backward compatibility helpers for existing modules
