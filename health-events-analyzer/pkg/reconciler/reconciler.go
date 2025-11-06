@@ -94,6 +94,13 @@ func (r *Reconciler) processHealthEvent(ctx context.Context, event *datamodels.H
 	startTime := time.Now()
 
 	slog.Debug("Received event", "event", event)
+	slog.Info("Health events analyzer processing event",
+		"nodeName", event.HealthEvent.NodeName,
+		"checkName", event.HealthEvent.CheckName,
+		"isFatal", event.HealthEvent.IsFatal,
+		"isHealthy", event.HealthEvent.IsHealthy,
+		"errorCode", event.HealthEvent.ErrorCode,
+		"createdAt", event.CreatedAt)
 
 	// Track event reception metrics
 	totalEventsReceived.WithLabelValues(event.HealthEvent.EntitiesImpacted[0].EntityValue).Inc()

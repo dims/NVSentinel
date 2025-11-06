@@ -286,6 +286,28 @@ func openChangeStreamWithRetry(
 }
 
 func (w *ChangeStreamWatcher) Start(ctx context.Context) {
+	// Start a monitoring goroutine to track channel health
+	go func(ctx context.Context) {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("Channel monitor stopping", "client", w.clientName)
+				return
+			case <-ticker.C:
+				channelLen := len(w.eventChannel)
+				channelCap := cap(w.eventChannel)
+				slog.Info("Channel health check",
+					"client", w.clientName,
+					"queuedEvents", channelLen,
+					"capacity", channelCap,
+					"utilization", fmt.Sprintf("%.1f%%", float64(channelLen)/float64(max(channelCap, 1))*100))
+			}
+		}
+	}(ctx)
+
 	go func(ctx context.Context) {
 		defer w.closeOnce.Do(func() {
 			close(w.eventChannel)
@@ -315,19 +337,53 @@ func (w *ChangeStreamWatcher) Start(ctx context.Context) {
 						continue
 					}
 
+					// DEBUG: Log raw change stream event
+					operationType := "unknown"
+					if opType, ok := event["operationType"].(string); ok {
+						operationType = opType
+					}
+
+					documentID := "unknown"
+					if fullDoc, ok := event["fullDocument"].(bson.M); ok {
+						if id, ok := fullDoc["_id"]; ok {
+							documentID = fmt.Sprintf("%v", id)
+						}
+					}
+
+					slog.Info("Change stream event received",
+						"client", w.clientName,
+						"operationType", operationType,
+						"documentID", documentID,
+						"hasFullDocument", event["fullDocument"] != nil,
+						"contextDone", ctx.Err() != nil)
+
 					// Convert MongoDB-specific bson.M to database-agnostic Event type
 					genericEvent := Event(event)
 
+					slog.Info("Attempting to send event to channel",
+						"client", w.clientName,
+						"documentID", documentID,
+						"channelCapacity", cap(w.eventChannel),
+						"channelLength", len(w.eventChannel))
+
 					// Use blocking send to guarantee delivery (like main branch)
 					// This ensures no events are lost between sender and receiver.
-					// The goroutine may block here if receiver is not ready,
+					// Tradeoff: The goroutine may block here if receiver is not ready,
 					// but this guarantees the event will be delivered once receiver is available.
 					// The context check in the outer select will catch cancellation between events.
 					// Proper shutdown sequence (Close -> close change stream -> close channel) ensures
 					// this goroutine exits cleanly without deadlock.
 					w.eventChannel <- genericEvent
+
+					slog.Info("Change stream event sent to channel",
+						"client", w.clientName,
+						"operationType", operationType,
+						"documentID", documentID)
 				} else if csErr != nil {
 					slog.Error("Failed to watch change stream", "client", w.clientName, "error", csErr)
+				} else {
+					// No event available, but no error - this is normal, just waiting
+					slog.Debug("Change stream waiting for next event", "client", w.clientName)
 				}
 			}
 		}
