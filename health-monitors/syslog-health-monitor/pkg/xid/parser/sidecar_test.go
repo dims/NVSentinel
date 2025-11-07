@@ -118,9 +118,9 @@ func TestSidecarParser_Parse(t *testing.T) {
 
 				if tc.mockStatusCode == 200 && tc.mockResponse != nil {
 					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(tc.mockResponse)
+					_ = json.NewEncoder(w).Encode(tc.mockResponse)
 				} else if tc.mockStatusCode != 200 {
-					w.Write([]byte("Server error"))
+					_, _ = w.Write([]byte("Server error"))
 				}
 			}))
 			defer server.Close()

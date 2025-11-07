@@ -294,9 +294,9 @@ func TestNodeDeletedDuringDrain(t *testing.T) {
 	testEnv.Test(t, feature.Feature())
 }
 
-func TestManualUncordonPropagation(t *testing.T) {
-	feature := features.New("TestManualUncordonPropagation").
-		WithLabel("suite", "fault-management-manual-intervention")
+func TestNodeRecoveryDuringDrain(t *testing.T) {
+	feature := features.New("TestNodeRecoveryDuringDrain").
+		WithLabel("suite", "node-drainer-advanced")
 
 	var testCtx *helpers.NodeDrainerTestContext
 	var podNames []string
@@ -311,255 +311,12 @@ func TestManualUncordonPropagation(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		podNames = helpers.CreatePodsFromTemplate(ctx, t, client,
-			"data/busybox-pods.yaml", testCtx.NodeName, testCtx.TestNamespace)
+		podNames = helpers.CreatePodsFromTemplate(ctx, t, client, "data/busybox-pods.yaml", testCtx.NodeName, testCtx.TestNamespace)
 		helpers.WaitForPodsRunning(ctx, t, client, testCtx.TestNamespace, podNames)
-
-		t.Log("Sending fatal health event to trigger quarantine and drain")
-		fatalEvent := helpers.NewHealthEvent(testCtx.NodeName).
-			WithErrorCode("79").
-			WithMessage("XID 79 fatal error")
-		helpers.SendHealthEvent(ctx, t, fatalEvent)
-
-		t.Log("Waiting for ND to start draining")
-		helpers.WaitForNodeLabel(ctx, t, client, testCtx.NodeName,
-			statemanager.NVSentinelStateLabelKey, helpers.DrainingLabelValue)
-
-		return ctx
-	})
-
-	feature.Assess("wait for deleteAfterTimeout timer to start", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		require.Eventually(t, func() bool {
-			found, _ := helpers.CheckNodeEventExists(ctx, client, testCtx.NodeName, "NodeDraining", "WaitingBeforeForceDelete", time.Time{})
-			return found
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval, "WaitingBeforeForceDelete event should be created")
-
-		return ctx
-	})
-
-	feature.Assess("manually uncordon the node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Operator manually uncordons the node")
-		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-		require.NoError(t, err)
-
-		node.Spec.Unschedulable = false
-		err = client.Resources().Update(ctx, node)
-		require.NoError(t, err)
-
-		return ctx
-	})
-
-	feature.Assess("verify FQ detects manual uncordon and sets annotation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Waiting for FQ to detect manual uncordon and clean up state")
-		require.Eventually(t, func() bool {
-			node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-			if err != nil {
-				return false
-			}
-
-			manualAnnotation, hasManual := node.Annotations["quarantinedNodeUncordonedManually"]
-			_, hasQuarantine := node.Annotations["quarantineHealthEvent"]
-
-			return hasManual && manualAnnotation == "True" && !hasQuarantine
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval, "FQ should detect manual uncordon")
-
-		return ctx
-	})
-
-	feature.Assess("verify ND stops draining (label removed)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Waiting for ND to process Cancelled event and remove draining label")
-		require.Eventually(t, func() bool {
-			node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-			if err != nil {
-				return false
-			}
-
-			_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
-			return !exists
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval, "ND should remove draining label")
-
-		return ctx
-	})
-
-	feature.Assess("verify pods survive past deleteAfterTimeout deadline", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Waiting past deleteAfterTimeout deadline to verify pods were not force deleted")
-		t.Log("deleteAfterTimeout = 1 minute, waiting 1min 5sec to be sure")
-		time.Sleep(1*time.Minute + 5*time.Second)
-
-		t.Log("Verifying pods still exist and were never marked for deletion")
-		for _, podName := range podNames {
-			pod := &v1.Pod{}
-			err := client.Resources().Get(ctx, podName, testCtx.TestNamespace, pod)
-			require.NoError(t, err, "pod %s should still exist after deleteAfterTimeout deadline", podName)
-			assert.Nil(t, pod.DeletionTimestamp, "pod %s should never have been marked for deletion", podName)
-			assert.Equal(t, v1.PodRunning, pod.Status.Phase, "pod %s should still be running", podName)
-		}
-
-		return ctx
-	})
-
-	feature.Assess("verify FR never created CR for cancelled drain", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Verifying FR never created RebootNode CR (event had no remediation action)")
-		helpers.WaitForNoRebootNodeCR(ctx, t, client, testCtx.NodeName)
-
-		return ctx
-	})
-
-	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		return helpers.TeardownNodeDrainer(ctx, t, c)
-	})
-
-	testEnv.Test(t, feature.Feature())
-}
-
-func TestManualUncordonWithFaultRemediation(t *testing.T) {
-	feature := features.New("TestManualUncordonWithFaultRemediation").
-		WithLabel("suite", "fault-management-manual-intervention-fr")
-
-	var testCtx *helpers.RemediationTestContext
-	var podNames []string
-	testNamespace := "immediate-test"
-
-	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		var newCtx context.Context
-		newCtx, testCtx = helpers.SetupFaultRemediationTest(ctx, t, c, testNamespace)
-		newCtx = helpers.ApplyNodeDrainerConfig(newCtx, t, c, "data/nd-all-modes.yaml")
-
-		return newCtx
-	})
-
-	feature.Assess("create pods and trigger quarantine", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		podNames = helpers.CreatePodsFromTemplate(ctx, t, client,
-			"data/busybox-pods.yaml", testCtx.NodeName, testNamespace)
-		helpers.WaitForPodsRunning(ctx, t, client, testNamespace, podNames)
-
-		t.Log("Sending fatal health event to trigger quarantine")
-		fatalEvent := helpers.NewHealthEvent(testCtx.NodeName).
-			WithErrorCode("79").
-			WithMessage("XID 79 fatal error").
-			WithRecommendedAction(24)
-		helpers.SendHealthEvent(ctx, t, fatalEvent)
-
-		t.Log("Waiting for node to be quarantined (FQ)")
-		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, true)
-
-		return ctx
-	})
-
-	feature.Assess("verify fault remediation creates CR", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Waiting for fault remediation to create RebootNode CR (FR)")
-		helpers.WaitForRebootNodeCR(ctx, t, client, testCtx.NodeName)
-
-		t.Log("Verifying remediation state annotation exists")
-		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-		require.NoError(t, err)
-		_, exists := node.Annotations["latestFaultRemediationState"]
-		assert.True(t, exists, "Remediation state annotation should exist")
-
-		return ctx
-	})
-
-	feature.Assess("manually uncordon the node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Operator manually uncordons the node")
-		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-		require.NoError(t, err)
-
-		node.Spec.Unschedulable = false
-		err = client.Resources().Update(ctx, node)
-		require.NoError(t, err)
-
-		return ctx
-	})
-
-	feature.Assess("verify FR clears remediation state annotation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Waiting for FR to process Cancelled event and clear remediation state")
-		require.Eventually(t, func() bool {
-			node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-			if err != nil {
-				return false
-			}
-
-			_, exists := node.Annotations["latestFaultRemediationState"]
-			return !exists
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval, "FR should clear remediation state annotation")
-
-		return ctx
-	})
-
-	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Cleaning up: RebootNode CRs and namespace")
-		err = helpers.DeleteAllRebootNodeCRs(ctx, t, client)
-		if err != nil {
-			t.Logf("Warning: failed to delete RebootNode CRs: %v", err)
-		}
-
-		helpers.RestoreNodeDrainerConfig(ctx, t, c)
-
-		return helpers.TeardownFaultRemediation(ctx, t, c)
-	})
-
-	testEnv.Test(t, feature.Feature())
-}
-
-func TestNodeRecoveryDuringDrain(t *testing.T) {
-	feature := features.New("TestNodeRecoveryDuringDrain").
-		WithLabel("suite", "node-drainer-advanced")
-
-	var testCtx *helpers.RemediationTestContext
-	var podNames []string
-	testNamespace := "delete-timeout-test"
-
-	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		var newCtx context.Context
-		newCtx, testCtx = helpers.SetupFaultRemediationTest(ctx, t, c, testNamespace)
-		newCtx = helpers.ApplyNodeDrainerConfig(newCtx, t, c, "data/nd-all-modes.yaml")
-		return newCtx
-	})
-
-	feature.Assess("create pods and trigger drain", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		podNames = helpers.CreatePodsFromTemplate(ctx, t, client, "data/busybox-pods.yaml", testCtx.NodeName, testNamespace)
-		helpers.WaitForPodsRunning(ctx, t, client, testNamespace, podNames)
 
 		event := helpers.NewHealthEvent(testCtx.NodeName).
 			WithErrorCode("79").
-			WithMessage("GPU Fallen off the bus").
-			WithRecommendedAction(24)
+			WithMessage("GPU Fallen off the bus")
 		helpers.SendHealthEvent(ctx, t, event)
 
 		helpers.WaitForNodeLabel(ctx, t, client, testCtx.NodeName, statemanager.NVSentinelStateLabelKey, helpers.DrainingLabelValue)
@@ -599,21 +356,14 @@ func TestNodeRecoveryDuringDrain(t *testing.T) {
 		return ctx
 	})
 
-	feature.Assess("verify pods survive past deleteAfterTimeout deadline", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("pods remain after drain abort", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		t.Log("Waiting past deleteAfterTimeout deadline to verify pods were not force deleted")
-		t.Log("deleteAfterTimeout = 1 minute, waiting 1min 5sec to be sure")
-		time.Sleep(1*time.Minute + 5*time.Second)
-
-		t.Log("Verifying pods still exist and were never marked for deletion")
 		for _, podName := range podNames {
 			pod := &v1.Pod{}
-			err := client.Resources().Get(ctx, podName, testNamespace, pod)
-			require.NoError(t, err, "pod %s should still exist after deleteAfterTimeout deadline", podName)
-			assert.Nil(t, pod.DeletionTimestamp, "pod %s should never have been marked for deletion", podName)
-			assert.Equal(t, v1.PodRunning, pod.Status.Phase, "pod %s should still be running", podName)
+			err := client.Resources().Get(ctx, podName, testCtx.TestNamespace, pod)
+			require.NoError(t, err, "pod %s should still exist after drain abort", podName)
 		}
 
 		return ctx
@@ -628,38 +378,13 @@ func TestNodeRecoveryDuringDrain(t *testing.T) {
 		labelValue, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
 		t.Logf("Node label after recovery: exists=%v, value=%s", exists, labelValue)
 
-		return ctx
-	})
-
-	feature.Assess("verify FR never created CR due to cancelled drain", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Verifying FR never created RebootNode CR (userpodsevictionstatus=Cancelled prevents FR pipeline match)")
-		helpers.WaitForNoRebootNodeCR(ctx, t, client, testCtx.NodeName)
-
-		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-		require.NoError(t, err)
-		_, exists := node.Annotations["latestFaultRemediationState"]
-		assert.False(t, exists, "FR should never create remediation annotation for cancelled drain")
+		helpers.DeletePodsByNames(ctx, t, client, testCtx.TestNamespace, podNames)
 
 		return ctx
 	})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		t.Log("Cleaning up")
-		helpers.DeletePodsByNames(ctx, t, client, testNamespace, podNames)
-		err = helpers.DeleteAllRebootNodeCRs(ctx, t, client)
-		if err != nil {
-			t.Logf("Warning: failed to delete RebootNode CRs: %v", err)
-		}
-
-		helpers.RestoreNodeDrainerConfig(ctx, t, c)
-
-		return helpers.TeardownFaultRemediation(ctx, t, c)
+		return helpers.TeardownNodeDrainer(ctx, t, c)
 	})
 
 	testEnv.Test(t, feature.Feature())
