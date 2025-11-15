@@ -200,7 +200,7 @@ err := dbClient.WithTransaction(ctx, func(sessCtx client.SessionContext) error {
 
 ## Architecture
 
-```
+```text
 ┌─────────────────┐
 │  Your Module    │
 └────────┬────────┘

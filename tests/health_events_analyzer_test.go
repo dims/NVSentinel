@@ -49,8 +49,8 @@ func TestMultipleRemediationsCompleted(t *testing.T) {
 	})
 
 	feature.Assess("Check if MultipleRemediations node condition is added", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		//client, err := c.NewClient()
-		//assert.NoError(t, err, "failed to create client")
+		client, err := c.NewClient()
+		assert.NoError(t, err, "failed to create client")
 		gpuNodeName := testCtx.NodeName
 
 		event := helpers.NewHealthEvent(gpuNodeName).
@@ -60,7 +60,7 @@ func TestMultipleRemediationsCompleted(t *testing.T) {
 		helpers.SendHealthEvent(ctx, t, event)
 
 		// FIXME(dims): This is not happening correctly and causing failures in CI.
-		// helpers.WaitForNodeConditionWithCheckName(ctx, t, client, gpuNodeName, "MultipleRemediations", "ErrorCode:31 GPU:0 Recommended Action=CONTACT_SUPPORT;")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, gpuNodeName, "MultipleRemediations", "ErrorCode:31 GPU:0 Recommended Action=CONTACT_SUPPORT;")
 
 		return ctx
 	})

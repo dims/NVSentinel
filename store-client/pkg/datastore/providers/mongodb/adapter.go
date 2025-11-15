@@ -142,16 +142,9 @@ func (a *AdaptedMongoStore) Provider() datastore.DataStoreProvider {
 func (a *AdaptedMongoStore) CreateChangeStreamWatcher(ctx context.Context, clientName string,
 	pipeline interface{}) (datastore.ChangeStreamWatcher, error) {
 	// Use our existing factory to create a change stream watcher
-	tokenConfig := client.TokenConfig{
-		ClientName:      clientName,
-		TokenDatabase:   a.config.Connection.Database,
-		TokenCollection: "ResumeTokens", // Default token collection
-	}
-
-	// Check if token collection is specified in config
-	if tokenColl := a.config.Options["tokenCollection"]; tokenColl != "" {
-		tokenConfig.TokenCollection = tokenColl
-	}
+	// Note: Token configuration is loaded from environment variables by the factory
+	// via config.TokenConfigFromEnv(clientName). To customize token collection,
+	// set the MONGODB_TOKEN_COLLECTION_NAME environment variable.
 
 	// CRITICAL: Pass the existing databaseClient to avoid creating duplicate clients
 	watcher, err := a.factory.CreateChangeStreamWatcher(ctx, a.databaseClient, clientName, pipeline)

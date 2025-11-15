@@ -55,10 +55,10 @@ type Components struct {
 func InitializeAll(ctx context.Context, params InitializationParams) (*Components, error) {
 	slog.Info("Starting node drainer initialization")
 
-	// Load environment configuration using the new unified system
-	envConfig, err := config.LoadEnvConfig()
+	// Load token configuration - preserves ClientName="node-drainer" for resume token lookups
+	tokenConfig, err := sdkconfig.TokenConfigFromEnv("node-drainer")
 	if err != nil {
-		return nil, fmt.Errorf("failed to load environment config: %w", err)
+		return nil, fmt.Errorf("failed to load token configuration: %w", err)
 	}
 
 	// Load datastore configuration using the new unified system
@@ -70,7 +70,6 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 	// Convert to legacy DatabaseConfig interface for compatibility with existing factory
 	// Pass the certificate mount path to the adapter to handle path resolution at runtime
 	databaseConfig := adapter.ConvertDataStoreConfigToLegacyWithCertPath(dsConfig, params.DatabaseClientCertMountPath)
-	tokenConfig := config.NewTokenConfig(envConfig)
 	pipeline := config.NewQuarantinePipeline()
 
 	tomlCfg, err := config.LoadTomlConfig(params.TomlConfigPath)
@@ -95,7 +94,16 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 	}
 
 	stateManager := initializeStateManager(clientSet)
-	reconcilerCfg := createReconcilerConfig(*tomlCfg, databaseConfig, tokenConfig, pipeline, stateManager)
+
+	// Convert store-client TokenConfig to client.TokenConfig type
+	// IMPORTANT: Preserves ClientName="node-drainer" for resume token lookups
+	clientTokenConfig := client.TokenConfig{
+		ClientName:      tokenConfig.ClientName,
+		TokenDatabase:   tokenConfig.TokenDatabase,
+		TokenCollection: tokenConfig.TokenCollection,
+	}
+
+	reconcilerCfg := createReconcilerConfig(*tomlCfg, databaseConfig, clientTokenConfig, pipeline, stateManager)
 
 	// Create client factory and database client
 	clientFactory := factory.NewClientFactory(databaseConfig)

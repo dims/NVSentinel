@@ -191,11 +191,8 @@ check_mongodb_imports() {
     
     # Check for direct (non-indirect) MongoDB driver dependencies
     local mongodb_deps
-    if ! mongodb_deps=$(cd "$gomod_dir" && go list -m -f '{{if not .Indirect}}{{.Path}}{{end}}' all 2>/dev/null | grep "^go.mongodb.org/mongo-driver" || true); then
-        # go list failed, skip this check
-        return 0
-    fi
-    
+    mongodb_deps=$(cd "$gomod_dir" && go list -m -f '{{if not .Indirect}}{{.Path}}{{end}}' all 2>/dev/null | grep "^go.mongodb.org/mongo-driver" || true)
+
     if [[ -n "$mongodb_deps" ]]; then
         print_error "  ✗ Direct MongoDB driver dependency detected in go.mod:"
         print_error "    $mongodb_deps"

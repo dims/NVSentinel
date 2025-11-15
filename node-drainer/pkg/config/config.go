@@ -167,10 +167,16 @@ func NewDatabaseConfig(databaseClientCertMountPath string) (config.DatabaseConfi
 	return config.NewDatabaseConfigFromEnv()
 }
 
-// NewTokenConfig creates a token configuration from environment config
+// NewTokenConfig is DEPRECATED and should not be used.
+// This function hardcoded ClientName="node-draining-module", which caused resume token
+// lookup failures because LoadEnvConfig uses ClientName="node-drainer".
+// Instead, use config.TokenConfigFromEnv("node-drainer") directly like other modules.
+//
+// Deprecated: Use config.TokenConfigFromEnv("node-drainer") instead.
 func NewTokenConfig(envConfig *EnvConfig) client.TokenConfig {
+	// Return config with the CORRECT ClientName to match what's used for token storage
 	return client.TokenConfig{
-		ClientName:      "node-draining-module",
+		ClientName:      "node-drainer", // Fixed: was "node-draining-module"
 		TokenDatabase:   envConfig.TokenDatabase,
 		TokenCollection: envConfig.TokenCollection,
 	}
