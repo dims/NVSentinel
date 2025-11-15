@@ -1036,3 +1036,163 @@ func getHistogramCount(t *testing.T, histogram prometheus.Histogram) uint64 {
 	require.NoError(t, err)
 	return metric.Histogram.GetSampleCount()
 }
+
+// TestReconciler_CancelledEventWithOngoingDrain validates that Cancelled events stop ongoing drain operations
+func TestReconciler_CancelledEventWithOngoingDrain(t *testing.T) {
+	setup := setupRequeueTest(t, []config.UserNamespace{
+		{Name: "timeout-*", Mode: config.ModeDeleteAfterTimeout},
+	})
+
+	nodeName := "cancel-during-drain-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	createNamespace(setup.ctx, t, setup.client, "timeout-test")
+
+	createPod(setup.ctx, t, setup.client, "timeout-test", "stuck-pod", nodeName, v1.PodRunning)
+
+	beforeCancelled := getCounterVecValue(t, metrics.CancelledEvent, nodeName, "test-check")
+
+	t.Log("Enqueue Quarantined event - should start deleteAfterTimeout drain")
+	event := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+	document := event
+	eventID := fmt.Sprintf("%v", document["_id"])
+
+	err := setup.queueMgr.EnqueueEventGeneric(setup.ctx, nodeName, event, setup.mockCollection)
+	require.NoError(t, err)
+
+	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
+
+	t.Log("Simulate Cancelled event from change stream - should stop draining immediately")
+	setup.reconciler.HandleCancellation(eventID, nodeName, model.Cancelled)
+
+	require.Eventually(t, func() bool {
+		node, err := setup.client.CoreV1().Nodes().Get(setup.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
+		return !exists
+	}, 15*time.Second, 500*time.Millisecond, "draining label should be removed quickly after cancellation")
+
+	afterCancelled := getCounterVecValue(t, metrics.CancelledEvent, nodeName, "test-check")
+	assert.GreaterOrEqual(t, afterCancelled, beforeCancelled+1, "CancelledEvent metric should increment")
+
+	pod, err := setup.client.CoreV1().Pods("timeout-test").Get(setup.ctx, "stuck-pod", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Nil(t, pod.DeletionTimestamp, "pod should not be deleted after cancellation")
+}
+
+// TestReconciler_UnQuarantinedEventCancelsOngoingDrain validates that UnQuarantined events cancel all in-progress drains for a node
+func TestReconciler_UnQuarantinedEventCancelsOngoingDrain(t *testing.T) {
+	setup := setupRequeueTest(t, []config.UserNamespace{
+		{Name: "timeout-*", Mode: config.ModeDeleteAfterTimeout},
+	})
+
+	nodeName := "unquarantine-cancel-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	createNamespace(setup.ctx, t, setup.client, "timeout-test")
+
+	createPod(setup.ctx, t, setup.client, "timeout-test", "stuck-pod", nodeName, v1.PodRunning)
+
+	t.Log("Enqueue Quarantined event - should start deleteAfterTimeout drain")
+	quarantinedEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+
+	err := setup.queueMgr.EnqueueEventGeneric(setup.ctx, nodeName, quarantinedEvent, setup.mockCollection)
+	require.NoError(t, err)
+
+	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
+
+	t.Log("Simulate UnQuarantined event from change stream - should cancel in-progress drains")
+	setup.reconciler.HandleCancellation("", nodeName, model.UnQuarantined)
+
+	t.Log("Enqueue UnQuarantined event - should process and clean up")
+	unquarantinedEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.UnQuarantined,
+	})
+	err = setup.queueMgr.EnqueueEventGeneric(setup.ctx, nodeName, unquarantinedEvent, setup.mockCollection)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		node, err := setup.client.CoreV1().Nodes().Get(setup.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
+		return !exists
+	}, 15*time.Second, 500*time.Millisecond, "draining label should be removed after UnQuarantined event")
+
+	pod, err := setup.client.CoreV1().Pods("timeout-test").Get(setup.ctx, "stuck-pod", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Nil(t, pod.DeletionTimestamp, "pod should not be deleted after cancellation")
+}
+
+// TestReconciler_MultipleEventsOnNodeCancelledByUnQuarantine validates that UnQuarantined cancels all in-progress events
+func TestReconciler_MultipleEventsOnNodeCancelledByUnQuarantine(t *testing.T) {
+	setup := setupRequeueTest(t, []config.UserNamespace{
+		{Name: "timeout-*", Mode: config.ModeDeleteAfterTimeout},
+	})
+
+	nodeName := "multi-event-cancel-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	createNamespace(setup.ctx, t, setup.client, "timeout-test")
+
+	createPod(setup.ctx, t, setup.client, "timeout-test", "pod-1", nodeName, v1.PodRunning)
+	createPod(setup.ctx, t, setup.client, "timeout-test", "pod-2", nodeName, v1.PodRunning)
+
+	t.Log("Enqueue two Quarantined events for the same node")
+	event1 := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+	event1["_id"] = nodeName + "-event-1"
+
+	event2 := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+	event2["_id"] = nodeName + "-event-2"
+
+	err := setup.queueMgr.EnqueueEventGeneric(setup.ctx, nodeName, event1, setup.mockCollection)
+	require.NoError(t, err)
+
+	err = setup.queueMgr.EnqueueEventGeneric(setup.ctx, nodeName, event2, setup.mockCollection)
+	require.NoError(t, err)
+
+	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
+
+	t.Log("Send UnQuarantined event - should cancel both in-progress events")
+	setup.reconciler.HandleCancellation("", nodeName, model.UnQuarantined)
+
+	unquarantinedEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.UnQuarantined,
+	})
+	err = setup.queueMgr.EnqueueEventGeneric(setup.ctx, nodeName, unquarantinedEvent, setup.mockCollection)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		node, err := setup.client.CoreV1().Nodes().Get(setup.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
+		return !exists
+	}, 15*time.Second, 500*time.Millisecond, "draining label should be removed after UnQuarantined")
+
+	pod1, err := setup.client.CoreV1().Pods("timeout-test").Get(setup.ctx, "pod-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Nil(t, pod1.DeletionTimestamp, "pod-1 should not be deleted")
+
+	pod2, err := setup.client.CoreV1().Pods("timeout-test").Get(setup.ctx, "pod-2", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Nil(t, pod2.DeletionTimestamp, "pod-2 should not be deleted")
+}
