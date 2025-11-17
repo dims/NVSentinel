@@ -39,7 +39,6 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/metrics"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
-	"github.com/nvidia/nvsentinel/store-client/pkg/helper"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -135,22 +134,50 @@ func (r *Reconciler) SetEventWatcher(eventWatcher eventwatcher.EventWatcherInter
 }
 
 func (r *Reconciler) Start(ctx context.Context) error {
-	// Create datastore client bundle using helper
-	bundle, err := helper.NewDatastoreClientFromConfig(
-		ctx, "fault-quarantine", *r.config.DataStoreConfig, r.config.DatabasePipeline,
-	)
+	// Create datastore using NEW abstraction
+	ds, err := datastore.NewDataStore(ctx, *r.config.DataStoreConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create datastore client bundle: %w", err)
+		return fmt.Errorf("failed to create datastore: %w", err)
 	}
-	defer bundle.Close(ctx)
+	defer ds.Close(ctx)
 
-	// Use the clients from the bundle
-	databaseClient := bundle.DatabaseClient
-	changeStreamWatcher := bundle.ChangeStreamWatcher
+	// Type-assert to get database client and create change stream watcher
+	// Both MongoDB and PostgreSQL datastores support these methods for backward compatibility
+	datastoreAdapter, ok := ds.(interface {
+		GetDatabaseClient() client.DatabaseClient
+		CreateChangeStreamWatcher(
+			ctx context.Context, clientName string, pipeline interface{},
+		) (datastore.ChangeStreamWatcher, error)
+	})
+	if !ok {
+		return fmt.Errorf("datastore does not support required operations (GetDatabaseClient and CreateChangeStreamWatcher)")
+	}
+
+	databaseClient := datastoreAdapter.GetDatabaseClient()
+
+	// Create change stream watcher using datastore's method
+	changeStreamWatcher, err := datastoreAdapter.CreateChangeStreamWatcher(
+		ctx, "fault-quarantine", r.config.DatabasePipeline)
+	if err != nil {
+		return fmt.Errorf("failed to create change stream watcher: %w", err)
+	}
+
+	// Unwrap to get the underlying client.ChangeStreamWatcher for EventWatcher compatibility
+	// Both MongoDB and PostgreSQL adapters support unwrapping to the legacy interface
+	type unwrapper interface {
+		Unwrap() client.ChangeStreamWatcher
+	}
+
+	unwrapable, ok := changeStreamWatcher.(unwrapper)
+	if !ok {
+		return fmt.Errorf("watcher does not support unwrapping to client.ChangeStreamWatcher")
+	}
+
+	oldWatcher := unwrapable.Unwrap()
 
 	// Create event watcher with the new signature
 	r.eventWatcher = eventwatcher.NewEventWatcher(
-		changeStreamWatcher,
+		oldWatcher,
 		databaseClient,
 		time.Second*30, // 30 second metric update interval
 		r,              // Reconciler implements LastProcessedObjectIDStore interface
@@ -331,6 +358,18 @@ func (r *Reconciler) ProcessEvent(
 
 	isNodeQuarantined := r.handleEvent(ctx, event, ruleSetEvals, rulesetsConfig)
 
+	slog.Info("[FQ-DEBUG] ProcessEvent completed",
+		"nodeName", event.HealthEvent.NodeName,
+		"checkName", event.HealthEvent.CheckName,
+		"returnedStatusIsNil", isNodeQuarantined == nil,
+		"returnedStatusValue", func() string {
+			if isNodeQuarantined != nil {
+				return string(*isNodeQuarantined)
+			}
+
+			return "nil"
+		}())
+
 	if isNodeQuarantined == nil {
 		slog.Debug("Skipped processing event for node, no status update needed", "node", event.HealthEvent.NodeName)
 	} else if *isNodeQuarantined == model.Quarantined ||
@@ -372,9 +411,22 @@ func (r *Reconciler) handleEvent(
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 	rulesetsConfig rulesetsConfig,
 ) *model.Status {
+	slog.Info("[FQ-FLOW-DEBUG] handleEvent ENTRY",
+		"nodeName", event.HealthEvent.NodeName,
+		"checkName", event.HealthEvent.CheckName,
+		"isFatal", event.HealthEvent.IsFatal,
+		"recommendedAction", event.HealthEvent.RecommendedAction)
+
 	annotations, quarantineAnnotationExists := r.hasExistingQuarantine(event.HealthEvent.NodeName)
 
+	slog.Info("[FQ-FLOW-DEBUG] Checked existing quarantine",
+		"nodeName", event.HealthEvent.NodeName,
+		"quarantineAnnotationExists", quarantineAnnotationExists)
+
 	if quarantineAnnotationExists {
+		slog.Info("[FQ-FLOW-DEBUG] Node already quarantined, calling handleAlreadyQuarantinedNode",
+			"nodeName", event.HealthEvent.NodeName)
+
 		return r.handleAlreadyQuarantinedNode(ctx, event.HealthEvent, ruleSetEvals)
 	}
 
@@ -399,6 +451,10 @@ func (r *Reconciler) handleEvent(
 
 	var isCordoned atomic.Bool
 
+	slog.Info("[FQ-FLOW-DEBUG] About to evaluate rulesets",
+		"nodeName", event.HealthEvent.NodeName,
+		"checkName", event.HealthEvent.CheckName)
+
 	r.evaluateRulesets(
 		event, ruleSetEvals, rulesetsConfig,
 		taintAppliedMap, &labelsMap, &isCordoned, taintEffectPriorityMap,
@@ -409,11 +465,41 @@ func (r *Reconciler) handleEvent(
 	annotationsMap := r.prepareAnnotations(taintsToBeApplied, &labelsMap, &isCordoned)
 
 	isNodeQuarantined := len(taintsToBeApplied) > 0 || isCordoned.Load()
-	if !isNodeQuarantined {
+
+	slog.Info("[FQ-FLOW-DEBUG] After evaluating rulesets",
+		"nodeName", event.HealthEvent.NodeName,
+		"taintsToBeAppliedCount", len(taintsToBeApplied),
+		"isCordoned", isCordoned.Load(),
+		"isNodeQuarantined", isNodeQuarantined,
+		"dryRunMode", r.config.DryRun)
+
+	// In dry-run mode, always apply annotations for observability even if no actions would be taken
+	if !isNodeQuarantined && !r.config.DryRun {
+		slog.Info("[FQ-FLOW-DEBUG] Skipping applyQuarantine - no quarantine actions needed",
+			"nodeName", event.HealthEvent.NodeName)
+
 		return nil
 	}
 
-	return r.applyQuarantine(ctx, event, annotations, taintsToBeApplied, annotationsMap, &labelsMap, &isCordoned)
+	slog.Info("[FQ-FLOW-DEBUG] Calling applyQuarantine",
+		"nodeName", event.HealthEvent.NodeName,
+		"taintsCount", len(taintsToBeApplied),
+		"isCordoned", isCordoned.Load())
+
+	status := r.applyQuarantine(ctx, event, annotations, taintsToBeApplied, annotationsMap, &labelsMap, &isCordoned)
+
+	slog.Info("[FQ-FLOW-DEBUG] applyQuarantine returned",
+		"nodeName", event.HealthEvent.NodeName,
+		"statusIsNil", status == nil,
+		"statusValue", func() string {
+			if status != nil {
+				return string(*status)
+			}
+
+			return "nil"
+		}())
+
+	return status
 }
 
 func (r *Reconciler) hasExistingQuarantine(nodeName string) (map[string]string, bool) {
@@ -652,21 +738,36 @@ func (r *Reconciler) applyQuarantine(
 	labelsMap *sync.Map,
 	isCordoned *atomic.Bool,
 ) *model.Status {
+	slog.Info("[FQ-APPLY-DEBUG] applyQuarantine ENTRY", "node", event.HealthEvent.NodeName,
+		"checkName", event.HealthEvent.CheckName,
+		"numTaints", len(taintsToBeApplied),
+		"isCordoned", isCordoned.Load(),
+		"numAnnotations", len(annotationsMap),
+		"dryRunMode", r.config.DryRun)
+
 	r.recordCordonEventInCircuitBreaker(event)
 
 	healthEvents := healthEventsAnnotation.NewHealthEventsAnnotationMap()
 	updated := healthEvents.AddOrUpdateEvent(event.HealthEvent)
 
+	slog.Info("[FQ-APPLY-DEBUG] AddOrUpdateEvent result",
+		"node", event.HealthEvent.NodeName,
+		"updated", updated)
+
 	if !updated {
-		slog.Info("Health event already exists for node, skipping quarantine",
+		slog.Info("[FQ-APPLY-DEBUG] Health event already exists for node, skipping quarantine",
 			"event", event.HealthEvent, "node", event.HealthEvent.NodeName)
 
 		return nil
 	}
 
 	if err := r.addHealthEventAnnotation(healthEvents, annotationsMap); err != nil {
+		slog.Error("[FQ-APPLY-DEBUG] Failed to add health event annotation", "error", err, "node", event.HealthEvent.NodeName)
+
 		return nil
 	}
+
+	slog.Info("[FQ-APPLY-DEBUG] Added health event annotation successfully", "node", event.HealthEvent.NodeName)
 
 	// Remove manual uncordon annotation if present before applying new quarantine
 	r.cleanupManualUncordonAnnotation(ctx, event.HealthEvent.NodeName, annotations)
@@ -689,6 +790,12 @@ func (r *Reconciler) applyQuarantine(
 		return true
 	})
 
+	slog.Info("[FQ-APPLY-DEBUG] About to call QuarantineNodeAndSetAnnotations",
+		"node", event.HealthEvent.NodeName,
+		"numTaints", len(taintsToBeApplied),
+		"isCordoned", isCordoned.Load(),
+		"numLabels", len(labels))
+
 	err := r.k8sClient.QuarantineNodeAndSetAnnotations(
 		ctx,
 		event.HealthEvent.NodeName,
@@ -698,15 +805,19 @@ func (r *Reconciler) applyQuarantine(
 		labels,
 	)
 	if err != nil {
-		slog.Error("Failed to taint and cordon node", "node", event.HealthEvent.NodeName, "error", err)
+		slog.Error("[FQ-APPLY-DEBUG] Failed to taint and cordon node", "node", event.HealthEvent.NodeName, "error", err)
 		metrics.ProcessingErrors.WithLabelValues("taint_and_cordon_error").Inc()
 
 		return nil
 	}
 
+	slog.Info("[FQ-APPLY-DEBUG] QuarantineNodeAndSetAnnotations SUCCESS", "node", event.HealthEvent.NodeName)
+
 	r.updateQuarantineMetrics(event.HealthEvent.NodeName, taintsToBeApplied, isCordoned)
 
 	status := model.Quarantined
+
+	slog.Info("[FQ-APPLY-DEBUG] applyQuarantine returning Quarantined status", "node", event.HealthEvent.NodeName)
 
 	return &status
 }

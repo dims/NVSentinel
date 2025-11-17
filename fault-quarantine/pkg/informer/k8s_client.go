@@ -203,6 +203,10 @@ func (c *FaultQuarantineClient) QuarantineNodeAndSetAnnotations(
 	annotations map[string]string,
 	labels map[string]string,
 ) error {
+	slog.Info("DRY-RUN DEBUG: QuarantineNodeAndSetAnnotations called", "node", nodename,
+		"numAnnotations", len(annotations), "isCordon", isCordon, "numTaints", len(taints),
+		"dryRunMode", c.DryRunMode)
+
 	updateFn := func(node *v1.Node) error {
 		if len(taints) > 0 {
 			if err := c.applyTaints(node, taints, nodename); err != nil {
@@ -264,6 +268,10 @@ func (c *FaultQuarantineClient) applyTaints(node *v1.Node, taints []config.Taint
 
 func (c *FaultQuarantineClient) handleCordon(node *v1.Node, nodename string) bool {
 	_, exist := node.Annotations[common.QuarantineHealthEventAnnotationKey]
+
+	slog.Info("DRY-RUN DEBUG: handleCordon", "node", nodename, "isUnschedulable", node.Spec.Unschedulable,
+		"hasQuarantineAnnotation", exist, "dryRunMode", c.DryRunMode)
+
 	if node.Spec.Unschedulable {
 		if exist {
 			slog.Info("Node already cordoned by FQM; skipping taint/annotation updates", "node", nodename)
@@ -286,6 +294,16 @@ func (c *FaultQuarantineClient) applyAnnotations(node *v1.Node, annotations map[
 	if node.Annotations == nil {
 		node.Annotations = make(map[string]string)
 	}
+
+	slog.Info("DRY-RUN DEBUG: applyAnnotations called", "node", nodename, "numAnnotations", len(annotations),
+		"annotationKeys", func() []string {
+			keys := make([]string, 0, len(annotations))
+			for k := range annotations {
+				keys = append(keys, k)
+			}
+
+			return keys
+		}())
 
 	slog.Info("Setting annotations on node", "node", nodename, "annotations", annotations)
 

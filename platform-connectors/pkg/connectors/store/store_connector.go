@@ -150,12 +150,22 @@ func (r *DatabaseStoreConnector) insertHealthEvents(
 	// Prepare all documents for batch insertion
 	healthEventWithStatusList := make([]interface{}, 0, len(healthEvents.GetEvents()))
 
-	for _, healthEvent := range healthEvents.GetEvents() {
+	slog.Info("=== [PLATFORM-CONNECTORS-DEBUG] insertHealthEvents ENTRY ===",
+		"eventCount", len(healthEvents.GetEvents()))
+
+	for i, healthEvent := range healthEvents.GetEvents() {
 		// CRITICAL FIX: Clone the HealthEvent to avoid pointer reuse issues with gRPC buffers
 		// Without this clone, the healthEvent pointer may point to reused gRPC buffer memory
 		// that gets overwritten by subsequent requests, causing data corruption in MongoDB.
 		// This manifests as events having wrong isfatal/ishealthy/message values.
 		clonedHealthEvent := proto.Clone(healthEvent).(*protos.HealthEvent)
+
+		slog.Info("[PLATFORM-CONNECTORS-DEBUG] Processing health event",
+			"index", i,
+			"nodeName", clonedHealthEvent.NodeName,
+			"checkName", clonedHealthEvent.CheckName,
+			"isFatal", clonedHealthEvent.IsFatal,
+			"componentClass", clonedHealthEvent.ComponentClass)
 
 		healthEventWithStatusObj := model.HealthEventWithStatus{
 			CreatedAt:   time.Now().UTC(),
@@ -164,13 +174,22 @@ func (r *DatabaseStoreConnector) insertHealthEvents(
 		healthEventWithStatusList = append(healthEventWithStatusList, healthEventWithStatusObj)
 	}
 
+	slog.Info("=== [PLATFORM-CONNECTORS-DEBUG] About to call databaseClient.InsertMany ===",
+		"documentCount", len(healthEventWithStatusList),
+		"documentType", fmt.Sprintf("%T", healthEventWithStatusList[0]))
+
 	// Insert all documents in a single batch operation
 	// This ensures MongoDB generates INSERT operations (not UPDATE) for change streams
 	// Note: InsertMany is already atomic - either all documents are inserted or none are
 	_, err := r.databaseClient.InsertMany(ctx, healthEventWithStatusList)
 	if err != nil {
+		slog.Error("=== [PLATFORM-CONNECTORS-DEBUG] InsertMany FAILED ===",
+			"error", err)
+
 		return fmt.Errorf("insertMany failed: %w", err)
 	}
+
+	slog.Info("=== [PLATFORM-CONNECTORS-DEBUG] InsertMany SUCCESS ===")
 
 	return nil
 }

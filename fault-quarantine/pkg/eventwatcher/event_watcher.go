@@ -79,8 +79,18 @@ func (w *EventWatcher) SetProcessEventCallback(
 func (w *EventWatcher) Start(ctx context.Context) error {
 	slog.Info("Starting event watcher")
 
-	w.changeStreamWatcher.Start(ctx)
-	slog.Info("Change stream watcher started")
+	// Start the change stream watcher if it exists (nil for PostgreSQL)
+	if w.changeStreamWatcher != nil {
+		w.changeStreamWatcher.Start(ctx)
+		slog.Info("Change stream watcher started")
+	} else {
+		slog.Info("No change stream watcher (expected for PostgreSQL)")
+		// For PostgreSQL, just wait for context cancellation since there's no event stream
+		<-ctx.Done()
+		slog.Info("Context cancelled, stopping event watcher")
+
+		return nil
+	}
 
 	go w.updateUnprocessedEventsMetric(ctx)
 
@@ -109,7 +119,9 @@ func (w *EventWatcher) Start(ctx context.Context) error {
 		watchErr = fmt.Errorf("event watcher terminated: %w", err)
 	}
 
-	w.changeStreamWatcher.Close(ctx)
+	if w.changeStreamWatcher != nil {
+		w.changeStreamWatcher.Close(ctx)
+	}
 
 	return watchErr
 }
@@ -153,16 +165,52 @@ func (w *EventWatcher) processEvent(ctx context.Context, event client.Event) err
 		return fmt.Errorf("error getting document ID: %w", err)
 	}
 
+	slog.Info("[FQ-UUID-DEBUG] Retrieved event document ID",
+		"eventID", eventID,
+		"eventID_length", len(eventID),
+		"nodeName", healthEventWithStatus.HealthEvent.NodeName,
+		"checkName", healthEventWithStatus.HealthEvent.CheckName)
+
 	w.lastProcessedObjectID.StoreLastProcessedObjectID(eventID)
 
 	startTime := time.Now()
 	status := w.processEventCallback(ctx, &healthEventWithStatus)
 
+	slog.Info("[FQ-DEBUG] processEvent callback returned",
+		"eventID", eventID,
+		"nodeName", healthEventWithStatus.HealthEvent.NodeName,
+		"checkName", healthEventWithStatus.HealthEvent.CheckName,
+		"statusIsNil", status == nil,
+		"statusValue", func() string {
+			if status != nil {
+				return string(*status)
+			}
+
+			return "nil"
+		}())
+
 	if status != nil {
+		slog.Info("[FQ-DEBUG] About to update node quarantine status in database",
+			"eventID", eventID,
+			"nodeName", healthEventWithStatus.HealthEvent.NodeName,
+			"status", *status)
+
 		if err := w.updateNodeQuarantineStatus(ctx, eventID, status); err != nil {
 			metrics.ProcessingErrors.WithLabelValues("update_quarantine_status_error").Inc()
+			slog.Error("[FQ-DEBUG] FAILED to update node quarantine status",
+				"eventID", eventID,
+				"error", err)
+
 			return fmt.Errorf("failed to update node quarantine status: %w", err)
 		}
+
+		slog.Info("[FQ-DEBUG] SUCCESSFULLY updated node quarantine status in database",
+			"eventID", eventID,
+			"status", *status)
+	} else {
+		slog.Info("[FQ-DEBUG] Skipping database update because status is nil",
+			"eventID", eventID,
+			"nodeName", healthEventWithStatus.HealthEvent.NodeName)
 	}
 
 	duration := time.Since(startTime).Seconds()

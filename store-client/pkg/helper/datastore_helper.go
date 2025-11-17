@@ -101,16 +101,30 @@ func NewDatastoreClient(ctx context.Context, config DatastoreClientConfig) (*Dat
 
 	// Create change stream watcher if pipeline is provided
 	// CRITICAL: Pass the SAME database client to avoid creating duplicate clients with different channels!
+	// Note: PostgreSQL uses triggers + polling for change detection, not MongoDB-style change streams
 	if config.Pipeline != nil {
-		changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(
-			ctx, databaseClient, config.ModuleName, config.Pipeline)
-		if err != nil {
-			// Clean up database client on failure
-			databaseClient.Close(ctx)
-			return nil, fmt.Errorf("failed to create change stream watcher for %s: %w", config.ModuleName, err)
+		// Check if we should create a change stream watcher based on provider
+		shouldCreateWatcher := true
+
+		if config.DataStoreConfig != nil && config.DataStoreConfig.Provider == datastore.ProviderPostgreSQL {
+			slog.Info("Skipping change stream watcher for PostgreSQL provider",
+				"module", config.ModuleName,
+				"reason", "PostgreSQL uses triggers for change detection, not MongoDB-style change streams")
+
+			shouldCreateWatcher = false
 		}
 
-		bundle.ChangeStreamWatcher = changeStreamWatcher
+		if shouldCreateWatcher {
+			changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(
+				ctx, databaseClient, config.ModuleName, config.Pipeline)
+			if err != nil {
+				// Clean up database client on failure
+				databaseClient.Close(ctx)
+				return nil, fmt.Errorf("failed to create change stream watcher for %s: %w", config.ModuleName, err)
+			}
+
+			bundle.ChangeStreamWatcher = changeStreamWatcher
+		}
 	}
 
 	slog.Info("Successfully initialized datastore client",

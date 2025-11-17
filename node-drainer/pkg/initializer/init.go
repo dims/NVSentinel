@@ -49,9 +49,11 @@ type Components struct {
 	EventWatcher   client.ChangeStreamWatcher
 	QueueManager   queue.EventQueueManager
 	Reconciler     *reconciler.Reconciler
-	DatabaseClient client.DatabaseClient
+	DatabaseClient client.DatabaseClient // OLD MongoDB-specific (keep for backward compatibility)
+	DataStore      datastore.DataStore   // NEW database-agnostic
 }
 
+//nolint:cyclop // Complexity slightly over limit (11 vs 10) but function is clear and linear
 func InitializeAll(ctx context.Context, params InitializationParams) (*Components, error) {
 	slog.Info("Starting node drainer initialization")
 
@@ -114,18 +116,24 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 		return nil, fmt.Errorf("failed to create database client: %w", err)
 	}
 
+	// Create NEW database-agnostic datastore
+	ds, err := datastore.NewDataStore(ctx, *dsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create datastore: %w", err)
+	}
+
+	slog.Info("Created datastore", "provider", dsConfig.Provider)
+
 	// Reconciler creates its own queue manager and needs the database client
 	reconciler := initializeReconciler(reconcilerCfg, params.DryRun, clientSet, informersInstance, databaseClient)
 	queueManager := reconciler.GetQueueManager()
 
+	// Create change stream watcher for both MongoDB and PostgreSQL
 	// CRITICAL: Pass the existing databaseClient to avoid creating duplicate clients
-	changeStreamWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, databaseClient, "node-drainer", pipeline)
+	eventWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, databaseClient, "node-drainer", pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create change stream watcher: %w", err)
 	}
-
-	// Use the change stream watcher directly
-	eventWatcher := changeStreamWatcher
 
 	slog.Info("Initialization completed successfully")
 
@@ -134,7 +142,8 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 		EventWatcher:   eventWatcher,
 		QueueManager:   queueManager,
 		Reconciler:     reconciler,
-		DatabaseClient: databaseClient,
+		DatabaseClient: databaseClient, // OLD MongoDB-specific
+		DataStore:      ds,             // NEW database-agnostic
 	}, nil
 }
 

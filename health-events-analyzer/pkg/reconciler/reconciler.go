@@ -28,7 +28,6 @@ import (
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
-	"github.com/nvidia/nvsentinel/store-client/pkg/helper"
 )
 
 // No retry constants needed - EventProcessor no longer retries internally
@@ -42,7 +41,8 @@ type HealthEventsAnalyzerReconcilerConfig struct {
 
 type Reconciler struct {
 	config         HealthEventsAnalyzerReconcilerConfig
-	databaseClient client.DatabaseClient
+	datastore      datastore.DataStore
+	databaseClient client.DatabaseClient // MongoDB-specific client for aggregation
 	eventProcessor client.EventProcessor
 }
 
@@ -55,16 +55,49 @@ func NewReconciler(cfg HealthEventsAnalyzerReconcilerConfig) *Reconciler {
 // Start begins the reconciliation process by listening to change stream events
 // and processing them accordingly.
 func (r *Reconciler) Start(ctx context.Context) error {
-	// Use standardized datastore client initialization
-	bundle, err := helper.NewDatastoreClientFromConfig(
-		ctx, "health-events-analyzer", *r.config.DataStoreConfig, r.config.Pipeline,
-	)
+	// Create datastore using NEW abstraction
+	ds, err := datastore.NewDataStore(ctx, *r.config.DataStoreConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create datastore client bundle: %w", err)
+		return fmt.Errorf("failed to create datastore: %w", err)
 	}
-	defer bundle.Close(ctx)
+	defer ds.Close(ctx)
 
-	r.databaseClient = bundle.DatabaseClient
+	r.datastore = ds
+
+	// Type-assert to get database client and create change stream watcher
+	// Both MongoDB and PostgreSQL datastores support these methods for backward compatibility
+	datastoreAdapter, ok := ds.(interface {
+		GetDatabaseClient() client.DatabaseClient
+		CreateChangeStreamWatcher(
+			ctx context.Context, clientName string, pipeline interface{},
+		) (datastore.ChangeStreamWatcher, error)
+	})
+	if !ok {
+		return fmt.Errorf("datastore does not support required operations (GetDatabaseClient and CreateChangeStreamWatcher)")
+	}
+
+	r.databaseClient = datastoreAdapter.GetDatabaseClient()
+
+	// Create change stream watcher using datastore's method
+	// This returns an adapted watcher compatible with the OLD client.EventProcessor
+	changeStreamWatcher, err := datastoreAdapter.CreateChangeStreamWatcher(
+		ctx, "health-events-analyzer", r.config.Pipeline)
+	if err != nil {
+		return fmt.Errorf("failed to create change stream watcher: %w", err)
+	}
+
+	// Unwrap to get the underlying client.ChangeStreamWatcher for EventProcessor compatibility
+	// The MongoDB adapter returns an AdaptedChangeStreamWatcher that wraps the old interface
+	type unwrapper interface {
+		Unwrap() client.ChangeStreamWatcher
+	}
+
+	unwrapable, ok := changeStreamWatcher.(unwrapper)
+	if !ok {
+		return fmt.Errorf("watcher does not support unwrapping to client.ChangeStreamWatcher")
+	}
+
+	oldWatcher := unwrapable.Unwrap()
 
 	// Create and configure the unified EventProcessor
 	// Note: EventProcessor no longer retries internally to prevent blocking the event stream
@@ -75,7 +108,7 @@ func (r *Reconciler) Start(ctx context.Context) error {
 		MarkProcessedOnError: false, // IMPORTANT: Don't mark failed events as processed
 	}
 
-	r.eventProcessor = client.NewEventProcessor(bundle.ChangeStreamWatcher, bundle.DatabaseClient, processorConfig)
+	r.eventProcessor = client.NewEventProcessor(oldWatcher, r.databaseClient, processorConfig)
 
 	// Set the event handler for processing health events
 	r.eventProcessor.SetEventHandler(client.EventHandlerFunc(r.processHealthEvent))
@@ -120,7 +153,13 @@ func (r *Reconciler) processHealthEvent(ctx context.Context, event *datamodels.H
 
 	if publishedNewEvent {
 		slog.Info("New fatal event published.")
-		fatalEventsPublishedTotal.WithLabelValues(event.HealthEvent.EntitiesImpacted[0].EntityValue).Inc()
+		// Only track entity-specific metrics if EntitiesImpacted is not empty
+		if len(event.HealthEvent.EntitiesImpacted) > 0 {
+			fatalEventsPublishedTotal.WithLabelValues(event.HealthEvent.EntitiesImpacted[0].EntityValue).Inc()
+		} else {
+			slog.Warn("Fatal event published but EntitiesImpacted is empty, using 'unknown' for metrics")
+			fatalEventsPublishedTotal.WithLabelValues("unknown").Inc()
+		}
 	} else {
 		slog.Info("Fatal event is not published, rule set criteria didn't match.")
 	}
