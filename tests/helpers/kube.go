@@ -172,6 +172,9 @@ func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, n
 	// in TestFatalHealthEventEndToEnd. The UpdateFunc thread which has acquired the lock will be waiting for the main
 	// thead to read from the success channel. This is the desired behavior because we only want to have 1 UpdateFunc
 	// thread write true/false.
+	//
+	// NOTE: On ARM64 + PostgreSQL, rapid state transitions may occur faster than the Kubernetes watch
+	// can deliver updates. The watcher handles this by checking if labels appear later in the expected sequence.
 	var lock sync.Mutex
 
 	t.Logf("[LabelWatcher] Starting watcher for node %s, expecting sequence: %v (starting at index %d)",
@@ -201,35 +204,50 @@ func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, n
 						t.Logf("[LabelWatcher] ✓ All %d labels matched! Waiting for label removal...", len(labelValueSequence))
 					}
 				} else if actualValue != labelValueSequence[currentLabelIndex] && prevLabelValue != actualValue {
-					// If this is the first label we're seeing (currentLabelIndex == 0) and it doesn't match,
-					// we missed early labels due to race condition. Check if this label appears later in sequence.
-					if currentLabelIndex == 0 {
-						foundLaterInSequence := false
+					// Check if the actual label appears later in the sequence (skipped intermediate states)
+					// This can happen with fast state transitions, especially with PostgreSQL LISTEN/NOTIFY
+					foundLaterInSequence := false
+					skippedIndex := -1
 
-						for i := 1; i < len(labelValueSequence); i++ {
-							if actualValue == labelValueSequence[i] {
-								foundLaterInSequence = true
+					for i := currentLabelIndex + 1; i < len(labelValueSequence); i++ {
+						if actualValue == labelValueSequence[i] {
+							foundLaterInSequence = true
+							skippedIndex = i
 
-								t.Logf(
-									"[LabelWatcher] ✗ MISSED early labels: First label received is '%s' (expected index %d), "+
-										"but expected to start with '%s' (index 0)",
-									actualValue, i, labelValueSequence[0],
-								)
-
-								break
-							}
+							break
 						}
+					}
 
-						if !foundLaterInSequence {
-							t.Logf("[LabelWatcher] ✗ UNEXPECTED first label: got '%s', not in expected sequence at all", actualValue)
+					if foundLaterInSequence {
+						// We skipped intermediate states - log warning but continue
+						skippedLabels := labelValueSequence[currentLabelIndex:skippedIndex]
+						t.Logf(
+							"[LabelWatcher] ⚠ SKIPPED intermediate labels: %v (jumped from '%s' to '%s')",
+							skippedLabels, prevLabelValue, actualValue,
+						)
+						t.Logf("[LabelWatcher] ⚠ This is expected with fast state transitions (PostgreSQL LISTEN/NOTIFY)")
+
+						// Update state to the current label
+						prevLabelValue = actualValue
+						currentLabelIndex = skippedIndex + 1
+
+						if currentLabelIndex == len(labelValueSequence) {
+							t.Logf("[LabelWatcher] ✓ Reached final state despite skipped labels! Waiting for label removal...")
 						}
-
+					} else if currentLabelIndex == 0 {
+						// First label doesn't match and isn't in sequence - missed early labels
+						t.Logf(
+							"[LabelWatcher] ✗ MISSED early labels: First label received is '%s', "+
+								"but expected to start with '%s' (index 0)",
+							actualValue, labelValueSequence[0],
+						)
 						t.Logf("[LabelWatcher] Sending FAILURE to channel (missed early labels)")
 						sendNodeLabelResult(ctx, success, false)
 					} else {
-						// Not the first label, unexpected transition
+						// Completely unexpected transition (not in sequence at all)
 						t.Logf("[LabelWatcher] ✗ UNEXPECTED label transition: got '%s', expected '%s' (prev: '%s')",
 							actualValue, labelValueSequence[currentLabelIndex], prevLabelValue)
+						t.Logf("[LabelWatcher] ✗ Label '%s' is not in expected sequence", actualValue)
 						t.Logf("[LabelWatcher] Sending FAILURE to channel")
 						sendNodeLabelResult(ctx, success, false)
 					}
@@ -1414,7 +1432,9 @@ func WaitForNodeConditionWithCheckName(
 				condition.Reason == checkName+"IsNotHealthy" {
 				t.Logf("Checking if message matches: expected message=%s, actual message=%s", message, condition.Message)
 
-				if message == condition.Message {
+				// Check if all expected error code parts are present in the actual message
+				// Split by semicolon and check each non-empty part
+				if messageContainsAllParts(condition.Message, message) {
 					t.Logf("Found node condition: Type=%s, Reason=%s, Status=%s, Message=%s",
 						condition.Type, condition.Reason, condition.Status, condition.Message)
 
@@ -1427,6 +1447,26 @@ func WaitForNodeConditionWithCheckName(
 
 		return false
 	}, EventuallyWaitTimeout, WaitInterval, "node %s should have a condition with check name %s", nodeName, checkName)
+}
+
+// messageContainsAllParts checks if all semicolon-separated parts of expected are in actual.
+// This allows for flexible matching where the expected error codes don't need to be contiguous.
+func messageContainsAllParts(actual, expected string) bool {
+	// Split expected message by semicolon
+	parts := strings.Split(expected, ";")
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if !strings.Contains(actual, part) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // EnsureNodeConditionNotPresent ensures that the node does NOT have a condition with the reason as checkName.

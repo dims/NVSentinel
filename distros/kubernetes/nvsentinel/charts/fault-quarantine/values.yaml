@@ -37,6 +37,9 @@ podAnnotations: {}
 # Log level for the fault quarantine module (e.g. "debug", "info", "warn", "error")
 logLevel: info
 
+# Client certificate mount path for database connections
+clientCertMountPath: /etc/ssl/client-certs
+
 # Label prefix for node labels and annotations
 # Used to generate label keys like: <labelPrefix>cordon-by, <labelPrefix>cordon-reason, <labelPrefix>cordon-timestamp
 # Also used for uncordon labels: <labelPrefix>uncordon-by, <labelPrefix>uncordon-reason, <labelPrefix>uncordon-timestamp

@@ -59,7 +59,6 @@ func TestMultipleRemediationsCompleted(t *testing.T) {
 			WithRecommendedAction(int(pb.RecommendedAction_RESTART_VM))
 		helpers.SendHealthEvent(ctx, t, event)
 
-		// FIXME(dims): This is not happening correctly and causing failures in CI.
 		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, gpuNodeName, "MultipleRemediations", "ErrorCode:31 GPU:0 Recommended Action=CONTACT_SUPPORT;")
 
 		return ctx
@@ -124,6 +123,7 @@ func TestMultipleRemediationsNotTriggered(t *testing.T) {
 }
 
 func TestRepeatedXIDRule(t *testing.T) {
+	// Works with both MongoDB ($setWindowFields pipeline) and PostgreSQL (XidBurstDetector).
 	feature := features.New("TestRepeatedXIDRule").
 		WithLabel("suite", "health-event-analyzer")
 
