@@ -54,7 +54,7 @@ func NewPostgreSQLChangeStreamWatcher(
 		tableName:    tableName,
 		events:       make(chan datastore.EventWithToken, 100),
 		stopCh:       make(chan struct{}),
-		pollInterval: 5 * time.Second, // Default poll interval
+		pollInterval: 500 * time.Millisecond, // Default poll interval (reduced for better latency)
 	}
 }
 
@@ -215,12 +215,18 @@ func (w *PostgreSQLChangeStreamWatcher) processChangelogRows(rows *sql.Rows) ([]
 			return nil, fmt.Errorf("failed to scan changelog row: %w", err)
 		}
 
+		// Calculate event delivery latency
+		receivedAt := time.Now()
+		latency := receivedAt.Sub(changedAt)
+
 		slog.Info("[CHANGESTREAM-DEBUG] Processing changelog row",
 			"client", w.clientName,
 			"id", id,
 			"recordID", recordID,
 			"operation", operation,
 			"changedAt", changedAt,
+			"receivedAt", receivedAt,
+			"latencyMs", latency.Milliseconds(),
 			"hasOldValues", oldValues.Valid,
 			"hasNewValues", newValues.Valid)
 
@@ -253,7 +259,10 @@ func (w *PostgreSQLChangeStreamWatcher) buildEventDocument(
 ) map[string]interface{} {
 	event := map[string]interface{}{
 		"_id": map[string]interface{}{
-			"_data": recordID, // Use the actual document UUID from record_id
+			// Use changelog ID (not recordID) for _data field to maintain consistency
+			// with resume tokens and to ensure GetDocumentID() returns an int-parseable value
+			// that can be used for metrics and resume position tracking.
+			"_data": fmt.Sprintf("%d", id), // Use changelog sequence ID
 		},
 		"operationType": mapOperation(operation),
 		"clusterTime":   changedAt,
@@ -696,59 +705,68 @@ type PostgreSQLEventAdapter struct {
 	resumeToken []byte
 }
 
-// GetDocumentID extracts the document ID from the event
+// GetDocumentID returns the changelog sequence ID for this event.
+// This ID is used for:
+// - Tracking the last processed position in the changestream
+// - Metrics and monitoring (GetUnprocessedEventCount)
+// - Resume token comparisons
+//
+// For PostgreSQL, this returns the datastore_changelog.id (integer) as a string,
+// NOT the document's UUID. To get the document UUID, use GetRecordUUID().
+//
+// This maintains consistency with the resume token and ensures the returned
+// value can be parsed as an integer for metrics queries.
 func (e *PostgreSQLEventAdapter) GetDocumentID() (string, error) {
-	slog.Info("[GETDOCID-DEBUG] GetDocumentID called - checking for id field FIRST (NEW CODE v2)",
+	slog.Info("[GETDOCID-DEBUG] GetDocumentID called - retrieving changelog sequence ID",
 		"eventData_keys", getMapKeys(e.eventData))
 
-	// Try to get ID from fullDocument first
-	if fullDoc, ok := e.eventData["fullDocument"].(map[string]interface{}); ok {
-		slog.Info("[GETDOCID-DEBUG] Found fullDocument",
-			"fullDoc_keys", getMapKeys(fullDoc))
-
-		// Try "id" field (PostgreSQL lowercase)
-		if id, exists := fullDoc["id"]; exists {
-			slog.Info("[GETDOCID-DEBUG] SUCCESS - found 'id' field in fullDocument (PostgreSQL)",
-				"id_value", id)
-
-			return fmt.Sprintf("%v", id), nil
-		}
-
-		slog.Info("[GETDOCID-DEBUG] 'id' field not found, trying '_id' field")
-
-		// Try "_id" field (MongoDB compatibility)
-		if id, exists := fullDoc["_id"]; exists {
-			slog.Info("[GETDOCID-DEBUG] SUCCESS - found '_id' field in fullDocument (MongoDB)",
-				"id_value", id)
-
-			return fmt.Sprintf("%v", id), nil
-		}
-
-		slog.Warn("[GETDOCID-DEBUG] Neither 'id' nor '_id' found in fullDocument")
-	} else {
-		slog.Info("[GETDOCID-DEBUG] No fullDocument found in eventData")
-	}
-
-	// Try to get ID from _id field in the event
+	// Get the changelog sequence ID from _id._data
+	// After the fix at line 256, this contains the integer changelog ID (not the document UUID)
 	if idData, exists := e.eventData["_id"]; exists {
 		slog.Info("[GETDOCID-DEBUG] Found _id in event", "idData", idData)
 
 		if idMap, ok := idData.(map[string]interface{}); ok {
 			if dataVal, ok := idMap["_data"]; ok {
-				slog.Info("[GETDOCID-DEBUG] SUCCESS - found _data in _id map", "value", dataVal)
+				slog.Info("[GETDOCID-DEBUG] SUCCESS - found changelog ID in _id._data",
+					"value", dataVal,
+					"type", fmt.Sprintf("%T", dataVal))
 
 				return fmt.Sprintf("%v", dataVal), nil
 			}
 		}
 
-		slog.Info("[GETDOCID-DEBUG] SUCCESS - using _id directly", "value", idData)
+		// Fallback: use _id directly if _data not present
+		slog.Info("[GETDOCID-DEBUG] Using _id directly", "value", idData)
 
 		return fmt.Sprintf("%v", idData), nil
 	}
 
-	slog.Error("[GETDOCID-DEBUG] FAILED - no document ID found anywhere")
+	slog.Error("[GETDOCID-DEBUG] FAILED - no changelog sequence ID found in _id field")
 
-	return "", fmt.Errorf("document ID not found in event")
+	return "", fmt.Errorf("changelog sequence ID not found in event")
+}
+
+// GetRecordUUID returns the actual document UUID from the fullDocument.
+// This should be used when you need the business entity ID, not for
+// changestream tracking or resume tokens.
+//
+// For example, use this when:
+// - Correlating with other systems that reference the document UUID
+// - Business logic that needs the actual document identifier
+// - Deduplication based on document identity
+func (e *PostgreSQLEventAdapter) GetRecordUUID() (string, error) {
+	if fullDoc, ok := e.eventData["fullDocument"].(map[string]interface{}); ok {
+		// Try "id" field (PostgreSQL lowercase)
+		if id, exists := fullDoc["id"]; exists {
+			return fmt.Sprintf("%v", id), nil
+		}
+		// Try "_id" field (MongoDB compatibility)
+		if id, exists := fullDoc["_id"]; exists {
+			return fmt.Sprintf("%v", id), nil
+		}
+	}
+
+	return "", fmt.Errorf("record UUID not found in fullDocument")
 }
 
 // getMapKeys returns the keys of a map as a slice (helper for debugging)

@@ -53,20 +53,37 @@ type postgresqlEvent struct {
 	changedAt   time.Time
 }
 
+// GetDocumentID returns the changelog sequence ID (not the record UUID).
+// This maintains consistency with:
+// - Resume tokens (which use changelogID)
+// - Metrics queries (which expect int-parseable values)
+// - The PostgreSQLEventAdapter implementation
+//
+// For the actual document UUID, use GetRecordUUID().
 func (e *postgresqlEvent) GetDocumentID() (string, error) {
 	slog.Info("[PGCS-DEBUG] GetDocumentID called",
 		"changelogID", e.changelogID,
 		"recordID", e.recordID,
-		"recordID_length", len(e.recordID),
 		"tableName", e.tableName,
 		"operation", e.operation)
 
-	// The recordID field already contains the document UUID from the changelog's record_id column
-	// This is populated during the SQL query scan and is the correct document ID for all operations
-	slog.Info("[PGCS-DEBUG] Returning recordID as document ID",
-		"value", e.recordID,
-		"length", len(e.recordID))
+	// Return the changelog ID (not the record UUID) to maintain consistency
+	// with resume tokens and to ensure the ID is int-parseable for metrics.
+	// The changelog ID represents the changestream sequence position.
+	changelogIDStr := fmt.Sprintf("%d", e.changelogID)
 
+	slog.Info("[PGCS-DEBUG] Returning changelogID as document ID for sequence tracking",
+		"changelogID", e.changelogID,
+		"value", changelogIDStr,
+		"length", len(changelogIDStr))
+
+	return changelogIDStr, nil
+}
+
+// GetRecordUUID returns the actual document UUID for business logic.
+// Use this when you need the document's business identifier, not for
+// changestream position tracking.
+func (e *postgresqlEvent) GetRecordUUID() (string, error) {
 	return e.recordID, nil
 }
 
