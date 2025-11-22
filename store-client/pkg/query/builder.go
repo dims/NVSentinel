@@ -454,7 +454,8 @@ func isColumnField(field string) bool {
 		"createdAt": true,
 		"updatedAt": true,
 		// Note: MongoDB uses _id, but we map it to id column for PostgreSQL
-		"_id": true,
+		"_id":              true,
+		"node_quarantined": true, // Denormalized column in health_events table
 	}
 
 	return columnFields[field]

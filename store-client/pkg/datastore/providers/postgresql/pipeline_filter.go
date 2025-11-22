@@ -364,7 +364,17 @@ func (f *PipelineFilter) matchesNestedFields(actualValue interface{}, expectedFi
 
 	// All expected fields must match
 	for fieldPath, expectedFieldValue := range expectedFields {
-		actualFieldValue := f.getFieldValue(actualMap, fieldPath)
+		// Try direct key match first (for flat maps with dot-notation keys)
+		// This is important for PostgreSQL updatedFields which uses flat keys like
+		// "healtheventstatus.nodequarantined" instead of nested maps
+		var actualFieldValue interface{}
+		if directValue, exists := actualMap[fieldPath]; exists {
+			actualFieldValue = directValue
+		} else {
+			// Fall back to dot-notation path navigation (for nested maps)
+			actualFieldValue = f.getFieldValue(actualMap, fieldPath)
+		}
+
 		if !f.matchesValue(actualFieldValue, expectedFieldValue) {
 			return false
 		}

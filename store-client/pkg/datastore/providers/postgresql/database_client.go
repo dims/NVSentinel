@@ -248,6 +248,12 @@ func (c *PostgreSQLDatabaseClient) UpdateDocumentStatus(
 ) error {
 	// Use query builder to create update
 	update := query.NewUpdate().Set(statusPath, status)
+
+	// For health_events table with nodequarantined status, also update denormalized column
+	if c.tableName == "health_events" && statusPath == "healtheventstatus.nodequarantined" {
+		update.Set("node_quarantined", status)
+	}
+
 	setClause, args := update.ToSQL()
 
 	// For health_events table, use direct id column comparison

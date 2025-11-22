@@ -158,6 +158,24 @@ func (w *EventWatcher) processEvent(ctx context.Context, event client.Event) err
 		return fmt.Errorf("failed to unmarshal event: %w", err)
 	}
 
+	slog.Info("[FQ-UNMARSHAL-DEBUG] After UnmarshalDocument",
+		"fullStruct", fmt.Sprintf("%+v", healthEventWithStatus),
+		"hasHealthEvent", healthEventWithStatus.HealthEvent != nil,
+		"nodeName", func() string {
+			if healthEventWithStatus.HealthEvent != nil {
+				return healthEventWithStatus.HealthEvent.NodeName
+			}
+
+			return "<nil HealthEvent>"
+		}(),
+		"checkName", func() string {
+			if healthEventWithStatus.HealthEvent != nil {
+				return healthEventWithStatus.HealthEvent.CheckName
+			}
+
+			return "<nil HealthEvent>"
+		}())
+
 	slog.Debug("Processing event", "event", healthEventWithStatus)
 
 	eventID, err := event.GetDocumentID()
@@ -165,9 +183,17 @@ func (w *EventWatcher) processEvent(ctx context.Context, event client.Event) err
 		return fmt.Errorf("error getting document ID: %w", err)
 	}
 
-	slog.Info("[FQ-UUID-DEBUG] Retrieved event document ID",
+	// Get the record UUID for database updates (different from changelog ID for PostgreSQL)
+	recordUUID, err := event.GetRecordUUID()
+	if err != nil {
+		return fmt.Errorf("error getting record UUID: %w", err)
+	}
+
+	slog.Info("[FQ-UUID-DEBUG] Retrieved event IDs",
 		"eventID", eventID,
 		"eventID_length", len(eventID),
+		"recordUUID", recordUUID,
+		"recordUUID_length", len(recordUUID),
 		"nodeName", healthEventWithStatus.HealthEvent.NodeName,
 		"checkName", healthEventWithStatus.HealthEvent.CheckName)
 
@@ -178,6 +204,7 @@ func (w *EventWatcher) processEvent(ctx context.Context, event client.Event) err
 
 	slog.Info("[FQ-DEBUG] processEvent callback returned",
 		"eventID", eventID,
+		"recordUUID", recordUUID,
 		"nodeName", healthEventWithStatus.HealthEvent.NodeName,
 		"checkName", healthEventWithStatus.HealthEvent.CheckName,
 		"statusIsNil", status == nil,
@@ -192,13 +219,15 @@ func (w *EventWatcher) processEvent(ctx context.Context, event client.Event) err
 	if status != nil {
 		slog.Info("[FQ-DEBUG] About to update node quarantine status in database",
 			"eventID", eventID,
+			"recordUUID", recordUUID,
 			"nodeName", healthEventWithStatus.HealthEvent.NodeName,
 			"status", *status)
 
-		if err := w.updateNodeQuarantineStatus(ctx, eventID, status); err != nil {
+		if err := w.updateNodeQuarantineStatus(ctx, recordUUID, status); err != nil {
 			metrics.ProcessingErrors.WithLabelValues("update_quarantine_status_error").Inc()
 			slog.Error("[FQ-DEBUG] FAILED to update node quarantine status",
 				"eventID", eventID,
+				"recordUUID", recordUUID,
 				"error", err)
 
 			return fmt.Errorf("failed to update node quarantine status: %w", err)
@@ -206,10 +235,12 @@ func (w *EventWatcher) processEvent(ctx context.Context, event client.Event) err
 
 		slog.Info("[FQ-DEBUG] SUCCESSFULLY updated node quarantine status in database",
 			"eventID", eventID,
+			"recordUUID", recordUUID,
 			"status", *status)
 	} else {
 		slog.Info("[FQ-DEBUG] Skipping database update because status is nil",
 			"eventID", eventID,
+			"recordUUID", recordUUID,
 			"nodeName", healthEventWithStatus.HealthEvent.NodeName)
 	}
 

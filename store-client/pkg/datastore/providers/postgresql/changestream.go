@@ -269,7 +269,7 @@ func (w *PostgreSQLChangeStreamWatcher) buildEventDocument(
 		"fullDocument":  nil,
 	}
 
-	w.addDocumentDataToEvent(event, operation, oldValues, newValues)
+	w.addDocumentDataToEvent(event, recordID, operation, oldValues, newValues)
 
 	return event
 }
@@ -279,6 +279,7 @@ func (w *PostgreSQLChangeStreamWatcher) buildEventDocument(
 //nolint:cyclop,gocognit,nestif // Event processing requires operation-specific handling
 func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 	event map[string]interface{},
+	recordID string,
 	operation string,
 	oldValues, newValues sql.NullString,
 ) {
@@ -287,9 +288,22 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 		if newValues.Valid {
 			var doc map[string]interface{}
 			if err := json.Unmarshal([]byte(newValues.String), &doc); err == nil {
+				slog.Info("[CONSTRUCT-DEBUG] Parsed new_values for INSERT",
+					"tableName", w.tableName,
+					"docKeys", getMapKeys(doc),
+					"hasId", doc["id"] != nil,
+					"hasDocument", doc["document"] != nil)
+
 				// For health_events table, extract the inner document field
 				if w.tableName == healthEventsTable {
 					if innerDoc, ok := doc["document"].(map[string]interface{}); ok {
+						slog.Info("[CONSTRUCT-DEBUG] Extracted innerDoc",
+							"innerDocKeys", getMapKeys(innerDoc))
+
+						// Add the record ID from the database column (not from JSONB document)
+						innerDoc["id"] = recordID
+						slog.Info("[CONSTRUCT-DEBUG] Added id to innerDoc", "id", recordID)
+
 						event["fullDocument"] = innerDoc
 					} else {
 						event["fullDocument"] = doc
@@ -304,13 +318,32 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 		if newValues.Valid {
 			var newDoc map[string]interface{}
 			if err := json.Unmarshal([]byte(newValues.String), &newDoc); err == nil {
+				slog.Info("[CONSTRUCT-DEBUG] Parsed new_values for UPDATE",
+					"tableName", w.tableName,
+					"docKeys", getMapKeys(newDoc),
+					"hasId", newDoc["id"] != nil,
+					"hasDocument", newDoc["document"] != nil)
+
 				// For health_events table, extract the inner document field for comparison
 				var newDocForEvent, newDocForComparison map[string]interface{}
 
 				if w.tableName == healthEventsTable {
 					if innerDoc, ok := newDoc["document"].(map[string]interface{}); ok {
-						newDocForEvent = innerDoc
+						slog.Info("[CONSTRUCT-DEBUG] Extracted innerDoc for UPDATE",
+							"innerDocKeys", getMapKeys(innerDoc))
+
+						// Use innerDoc AS-IS for comparison (without top-level id)
 						newDocForComparison = innerDoc
+
+						// Create a copy with id for fullDocument
+						newDocForEvent = make(map[string]interface{})
+						for k, v := range innerDoc {
+							newDocForEvent[k] = v
+						}
+
+						// Add the record ID from the database column (not from JSONB document)
+						newDocForEvent["id"] = recordID
+						slog.Info("[CONSTRUCT-DEBUG] Added id to innerDoc for UPDATE", "id", recordID)
 					} else {
 						newDocForEvent = newDoc
 						newDocForComparison = newDoc
@@ -326,6 +359,13 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 				if oldValues.Valid {
 					var oldDoc map[string]interface{}
 					if err := json.Unmarshal([]byte(oldValues.String), &oldDoc); err == nil {
+						// DEBUG: Log the old and new values for comparison
+						oldValuesJSON, _ := json.Marshal(oldDoc)
+						newValuesJSON, _ := json.Marshal(newDoc)
+
+						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - old_values", "old_values", string(oldValuesJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - new_values", "new_values", string(newValuesJSON))
+
 						// For health_events table, extract the inner document field for comparison
 						var oldDocForComparison map[string]interface{}
 
@@ -339,11 +379,30 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 							oldDocForComparison = oldDoc
 						}
 
+						// DEBUG: Log what we're comparing
+						oldCmpJSON, _ := json.Marshal(oldDocForComparison)
+
+						newCmpJSON, _ := json.Marshal(newDocForComparison)
+
+						slog.Info("[CHANGESTREAM-DEBUG] Comparing oldDoc", "oldDoc", string(oldCmpJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] Comparing newDoc", "newDoc", string(newCmpJSON))
+
 						updatedFields := w.findUpdatedFields(oldDocForComparison, newDocForComparison)
+
+						// DEBUG: Log what findUpdatedFields returned
+						updatedFieldsJSON, _ := json.Marshal(updatedFields)
+						slog.Info("[CHANGESTREAM-DEBUG] findUpdatedFields returned", "updatedFields", string(updatedFieldsJSON))
+
 						if len(updatedFields) > 0 {
 							event["updateDescription"] = map[string]interface{}{
 								"updatedFields": updatedFields,
 							}
+
+							// DEBUG: Log the complete updateDescription
+							updateDescJSON, _ := json.Marshal(event["updateDescription"])
+							slog.Info("[CHANGESTREAM-DEBUG] updateDescription added to event", "updateDescription", string(updateDescJSON))
+						} else {
+							slog.Info("[CHANGESTREAM-DEBUG] No updatedFields found, updateDescription not added")
 						}
 					}
 				}
@@ -422,10 +481,14 @@ func (w *PostgreSQLChangeStreamWatcher) flattenMap(
 
 		// Recursively flatten nested maps
 		if vMap, ok := v.(map[string]interface{}); ok {
+			slog.Info("[FLATTENMAP-DEBUG] Recursing into nested map at key", "key", fullKey)
 			w.flattenMap(prefix, k, vMap, oldV, result)
 		} else if !w.valuesEqual(oldV, v) {
 			// Only include if the value actually changed
+			slog.Info("[FLATTENMAP-DEBUG] Adding changed field", "key", fullKey, "newValue", v, "oldValue", oldV)
 			result[fullKey] = v
+		} else {
+			slog.Info("[FLATTENMAP-DEBUG] Skipping unchanged field", "key", fullKey, "value", v)
 		}
 	}
 }
@@ -591,7 +654,28 @@ func (w *PostgreSQLChangeStreamWatcher) loadResumePosition(ctx context.Context) 
 	err := w.db.QueryRowContext(ctx, query, w.clientName).Scan(&tokenJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			w.lastEventID = 0 // Start from beginning
+			// No resume token found - start from current position (like MongoDB does)
+			// This prevents replaying all historical events on first startup
+			maxIDQuery := `
+				SELECT COALESCE(MAX(id), 0)
+				FROM datastore_changelog
+				WHERE table_name = $1
+			`
+
+			var maxID int64
+
+			err := w.db.QueryRowContext(ctx, maxIDQuery, w.tableName).Scan(&maxID)
+			if err != nil {
+				return fmt.Errorf("failed to get latest event ID: %w", err)
+			}
+
+			w.lastEventID = maxID
+
+			slog.Info("No resume token found, starting from current position",
+				"client", w.clientName,
+				"eventID", maxID,
+				"table", w.tableName)
+
 			return nil
 		}
 
@@ -755,15 +839,29 @@ func (e *PostgreSQLEventAdapter) GetDocumentID() (string, error) {
 // - Business logic that needs the actual document identifier
 // - Deduplication based on document identity
 func (e *PostgreSQLEventAdapter) GetRecordUUID() (string, error) {
+	slog.Info("[GETUUID-DEBUG] GetRecordUUID called",
+		"hasFullDocument", e.eventData["fullDocument"] != nil,
+		"eventDataKeys", getMapKeys(e.eventData))
+
 	if fullDoc, ok := e.eventData["fullDocument"].(map[string]interface{}); ok {
+		slog.Info("[GETUUID-DEBUG] fullDocument structure",
+			"fullDocKeys", getMapKeys(fullDoc))
+
 		// Try "id" field (PostgreSQL lowercase)
 		if id, exists := fullDoc["id"]; exists {
+			slog.Info("[GETUUID-DEBUG] Found 'id' field", "value", id)
 			return fmt.Sprintf("%v", id), nil
 		}
 		// Try "_id" field (MongoDB compatibility)
 		if id, exists := fullDoc["_id"]; exists {
+			slog.Info("[GETUUID-DEBUG] Found '_id' field", "value", id)
 			return fmt.Sprintf("%v", id), nil
 		}
+
+		slog.Error("[GETUUID-DEBUG] Neither 'id' nor '_id' found in fullDocument",
+			"fullDocKeys", getMapKeys(fullDoc))
+	} else {
+		slog.Error("[GETUUID-DEBUG] fullDocument is not a map or doesn't exist")
 	}
 
 	return "", fmt.Errorf("record UUID not found in fullDocument")
@@ -863,9 +961,27 @@ func (e *PostgreSQLEventAdapter) UnmarshalDocument(v interface{}) error {
 		return fmt.Errorf("failed to marshal event document: %w", err)
 	}
 
+	slog.Info("[UNMARSHAL-DEBUG] About to unmarshal into target",
+		"jsonDataLength", len(jsonData),
+		"jsonDataPreview", func() string {
+			if len(jsonData) > 500 {
+				return string(jsonData[:500]) + "..."
+			}
+
+			return string(jsonData)
+		}(),
+		"targetType", fmt.Sprintf("%T", v))
+
 	if err := json.Unmarshal(jsonData, v); err != nil {
+		slog.Error("[UNMARSHAL-DEBUG] Unmarshal FAILED",
+			"error", err,
+			"jsonData", string(jsonData))
+
 		return fmt.Errorf("failed to unmarshal event document: %w", err)
 	}
+
+	slog.Info("[UNMARSHAL-DEBUG] Unmarshal successful",
+		"result", fmt.Sprintf("%+v", v))
 
 	return nil
 }

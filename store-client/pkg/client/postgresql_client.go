@@ -214,6 +214,12 @@ func (c *PostgreSQLClient) InsertMany(ctx context.Context, documents []interface
 func (c *PostgreSQLClient) UpdateDocumentStatus(
 	ctx context.Context, documentID string, statusPath string, status interface{},
 ) error {
+	slog.Info("[UPDATE-STATUS-DEBUG] UpdateDocumentStatus called",
+		"documentID", documentID,
+		"statusPath", statusPath,
+		"status", status,
+		"table", c.table)
+
 	// Build the JSONB path for the status field
 	parts := strings.Split(statusPath, ".")
 	jsonbPath := "{" + strings.Join(parts, ",") + "}"
@@ -228,15 +234,56 @@ func (c *PostgreSQLClient) UpdateDocumentStatus(
 		)
 	}
 
-	// Build and execute update query
-	//nolint:gosec // G201: table name from config, using parameterized queries ($1, $2)
-	query := fmt.Sprintf(
-		"UPDATE %s SET document = jsonb_set(document, '%s', $1), updated_at = NOW() WHERE id = $2",
-		c.table, jsonbPath,
-	)
+	slog.Info("[UPDATE-STATUS-DEBUG] Marshaled status",
+		"statusJSON", string(statusJSON),
+		"jsonbPath", jsonbPath)
 
-	result, err := c.db.ExecContext(ctx, query, string(statusJSON), documentID)
+	// Build and execute update query
+	// For specific status paths, also update the denormalized top-level column
+	var query string
+
+	var args []interface{}
+
+	//nolint:gosec // G201: table name from config, using parameterized queries ($1, $2)
+
+	switch statusPath {
+	case "healtheventstatus.nodequarantined":
+		// Update both the JSONB field and the denormalized node_quarantined column
+		slog.Info("[UPDATE-STATUS-DEBUG] MATCHED nodequarantined case - will update both JSONB and column",
+			"documentID", documentID,
+			"status", status)
+
+		query = fmt.Sprintf(
+			"UPDATE %s SET document = jsonb_set(document, '%s', $1), node_quarantined = $2, updated_at = NOW() WHERE id = $3",
+			c.table, jsonbPath,
+		)
+		args = []interface{}{string(statusJSON), status, documentID}
+
+		slog.Info("[UPDATE-STATUS-DEBUG] Built query for nodequarantined",
+			"query", query,
+			"args", args)
+	default:
+		// Only update the JSONB field
+		slog.Info("[UPDATE-STATUS-DEBUG] Default case - only updating JSONB",
+			"statusPath", statusPath)
+
+		query = fmt.Sprintf(
+			"UPDATE %s SET document = jsonb_set(document, '%s', $1), updated_at = NOW() WHERE id = $2",
+			c.table, jsonbPath,
+		)
+		args = []interface{}{string(statusJSON), documentID}
+	}
+
+	slog.Info("[UPDATE-STATUS-DEBUG] About to execute query",
+		"query", query,
+		"argsCount", len(args))
+
+	result, err := c.db.ExecContext(ctx, query, args...)
 	if err != nil {
+		slog.Error("[UPDATE-STATUS-DEBUG] Query execution FAILED",
+			"error", err,
+			"query", query)
+
 		return datastore.NewUpdateError(
 			datastore.ProviderPostgreSQL,
 			fmt.Sprintf("failed to update status at path %s for document %s", statusPath, documentID),
@@ -253,13 +300,26 @@ func (c *PostgreSQLClient) UpdateDocumentStatus(
 		)
 	}
 
+	slog.Info("[UPDATE-STATUS-DEBUG] Query executed successfully",
+		"rowsAffected", rowsAffected,
+		"documentID", documentID,
+		"statusPath", statusPath)
+
 	if rowsAffected == 0 {
+		slog.Error("[UPDATE-STATUS-DEBUG] No rows affected - document not found",
+			"documentID", documentID)
+
 		return datastore.NewDocumentNotFoundError(
 			datastore.ProviderPostgreSQL,
 			fmt.Sprintf("document not found: %s", documentID),
 			nil,
 		)
 	}
+
+	slog.Info("[UPDATE-STATUS-DEBUG] UpdateDocumentStatus completed successfully",
+		"documentID", documentID,
+		"statusPath", statusPath,
+		"rowsAffected", rowsAffected)
 
 	return nil
 }

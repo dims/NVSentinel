@@ -17,28 +17,59 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
+// tryExtractIDFromEventID attempts to extract a valid document ID from event["_id"]
+// Returns the ID and true if valid, or empty string and false if it's a resume token
+func tryExtractIDFromEventID(id interface{}) (string, bool) {
+	// Check if this is a changestream resume token (map with _data field)
+	idMap, isMap := id.(map[string]interface{})
+	if isMap {
+		if _, hasData := idMap["_data"]; hasData {
+			// This is a PostgreSQL changestream resume token, not a document ID
+			slog.Warn("[EXTRACT-ID] Skipping _id with _data field (resume token)", "_id", id)
+			return "", false
+		}
+
+		// This is a MongoDB map-style ID, convert it
+		slog.Info("[EXTRACT-ID] Found MongoDB map ID in _id", "id", id)
+
+		return convertIDToString(id), true
+	}
+
+	// Simple string or ObjectID
+	slog.Info("[EXTRACT-ID] Found simple ID in _id", "id", id)
+
+	return convertIDToString(id), true
+}
+
 // ExtractDocumentID extracts the document ID from a raw event
 func ExtractDocumentID(event map[string]interface{}) (string, error) {
-	// Try MongoDB ObjectId format first
-	if id, exists := event["_id"]; exists {
-		return convertIDToString(id), nil
-	}
-
-	// Try PostgreSQL uuid format
-	if id, exists := event["id"]; exists {
-		return convertIDToString(id), nil
-	}
-
-	// Try in fullDocument for change stream events
+	// For changestream events, try fullDocument first
+	// This is important because in PostgreSQL changestreams, event["_id"] contains
+	// the resume token metadata ({"_data": "123"}), not the actual document ID.
 	if fullDoc, exists := event["fullDocument"]; exists {
 		if id, err := extractIDFromFullDocument(fullDoc); err == nil {
+			slog.Info("[EXTRACT-ID] Found ID in fullDocument", "id", id)
 			return id, nil
 		}
+	}
+
+	// Try MongoDB ObjectId format (for direct MongoDB queries, not changestreams)
+	if id, exists := event["_id"]; exists {
+		if docID, ok := tryExtractIDFromEventID(id); ok {
+			return docID, nil
+		}
+	}
+
+	// Try PostgreSQL uuid format (for direct PostgreSQL queries)
+	if id, exists := event["id"]; exists {
+		slog.Info("[EXTRACT-ID] Found ID in top-level id field", "id", id)
+		return convertIDToString(id), nil
 	}
 
 	return "", datastore.NewValidationError(

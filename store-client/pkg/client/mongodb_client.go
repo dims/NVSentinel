@@ -74,6 +74,12 @@ func (e *mongoEvent) GetDocumentID() (string, error) {
 	return objectID.Hex(), nil
 }
 
+// GetRecordUUID returns the record UUID.
+// For MongoDB, this is the same as GetDocumentID since MongoDB's _id is the primary identifier.
+func (e *mongoEvent) GetRecordUUID() (string, error) {
+	return e.GetDocumentID()
+}
+
 func (e *mongoEvent) GetNodeName() (string, error) {
 	fullDocument, ok := e.rawEvent["fullDocument"]
 	if !ok {
