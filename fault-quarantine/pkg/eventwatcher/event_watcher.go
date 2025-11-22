@@ -309,7 +309,7 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 	filter := map[string]interface{}{
 		"healthevent.nodename": nodeName,
 		"healtheventstatus.nodequarantined": map[string]interface{}{
-			"$in": []model.Status{model.Quarantined, model.UnQuarantined},
+			"$in": []interface{}{model.Quarantined, model.UnQuarantined},
 		},
 	}
 
@@ -377,7 +377,7 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 		"healthevent.nodename": nodeName,
 		"createdAt":            map[string]interface{}{"$gte": latestEvent.CreatedAt},
 		"healtheventstatus.nodequarantined": map[string]interface{}{
-			"$in": []model.Status{model.Quarantined, model.AlreadyQuarantined},
+			"$in": []interface{}{model.Quarantined, model.AlreadyQuarantined},
 		},
 	}
 

@@ -304,71 +304,129 @@ func (c *PostgreSQLDatabaseClient) UpdateManyDocuments(
 	return c.updateDocuments(ctx, filter, update, true)
 }
 
-// parseMongoOperator parses a MongoDB operator and adds it to the query builder
-func (c *PostgreSQLDatabaseClient) parseMongoOperator(
-	builder *query.Builder, key string, op string, opValue interface{},
-) error {
-	switch op {
-	case "$ne":
-		builder.Build(query.Ne(key, opValue))
-	case "$eq":
-		builder.Build(query.Eq(key, opValue))
-	case "$gt":
-		builder.Build(query.Gt(key, opValue))
-	case "$gte":
-		builder.Build(query.Gte(key, opValue))
-	case "$lt":
-		builder.Build(query.Lt(key, opValue))
-	case "$lte":
-		builder.Build(query.Lte(key, opValue))
-	case "$in":
-		// Type assert to []interface{} for $in operator
-		if inValues, ok := opValue.([]interface{}); ok {
-			builder.Build(query.In(key, inValues))
-		} else {
-			return fmt.Errorf("$in operator requires array value")
-		}
-	default:
-		return fmt.Errorf("unsupported MongoDB operator: %s", op)
-	}
-
-	return nil
-}
-
 // convertFilterToWhereClause converts various filter formats to SQL WHERE clause
 // The paramOffset parameter specifies where parameter numbering should start
+//
+//nolint:cyclop,gocognit,nestif,dupl // Acceptable complexity for filter conversion
 func (c *PostgreSQLDatabaseClient) convertFilterToWhereClause(
 	filter interface{}, paramOffset int,
 ) (string, []interface{}, error) {
+	slog.Debug("[FILTER-DEBUG] convertFilterToWhereClause called",
+		"filterType", fmt.Sprintf("%T", filter),
+		"paramOffset", paramOffset)
+
 	if builder, ok := filter.(*query.Builder); ok {
 		whereClause, filterArgs := builder.ToSQLWithOffset(paramOffset)
+		slog.Debug("[FILTER-DEBUG] Used Builder path",
+			"whereClause", whereClause,
+			"filterArgsCount", len(filterArgs))
 
 		return whereClause, filterArgs, nil
 	}
 
 	if filterMap, ok := filter.(map[string]interface{}); ok {
+		slog.Debug("[FILTER-DEBUG] Processing filterMap",
+			"filterMap", filterMap,
+			"keyCount", len(filterMap))
+
 		// Handle both simple equality and MongoDB-style filters
-		builder := query.New()
+		// Collect all conditions and combine them with AND
+		var conditions []query.Condition
 
 		for key, value := range filterMap {
+			slog.Debug("[FILTER-DEBUG] Processing filter key",
+				"key", key,
+				"valueType", fmt.Sprintf("%T", value))
+
 			// Check if value is a MongoDB operator map (e.g., {"$ne": "value"})
 			if valueMap, isMap := value.(map[string]interface{}); isMap {
+				slog.Debug("[FILTER-DEBUG] Found operator map",
+					"key", key,
+					"operators", valueMap)
+
 				// Parse MongoDB operators
 				for op, opValue := range valueMap {
-					if err := c.parseMongoOperator(builder, key, op, opValue); err != nil {
-						return "", nil, err
+					slog.Debug("[FILTER-DEBUG] Parsing operator",
+						"key", key,
+						"operator", op,
+						"opValueType", fmt.Sprintf("%T", opValue))
+
+					// Create condition directly based on operator
+					var cond query.Condition
+
+					//nolint:goconst // MongoDB operator strings are clear as literals
+					switch op {
+					case "$ne":
+						cond = query.Ne(key, opValue)
+					case "$eq":
+						cond = query.Eq(key, opValue)
+					case "$gt":
+						cond = query.Gt(key, opValue)
+					case "$gte":
+						cond = query.Gte(key, opValue)
+					case "$lt":
+						cond = query.Lt(key, opValue)
+					case "$lte":
+						cond = query.Lte(key, opValue)
+					case "$in":
+						if inValues, ok := opValue.([]interface{}); ok {
+							cond = query.In(key, inValues)
+						} else {
+							slog.Error("[FILTER-DEBUG] $in operator type mismatch",
+								"key", key,
+								"expectedType", "[]interface{}",
+								"actualType", fmt.Sprintf("%T", opValue))
+
+							return "", nil, fmt.Errorf("$in operator requires array value")
+						}
+					default:
+						slog.Error("[FILTER-DEBUG] Unsupported operator", "operator", op)
+
+						return "", nil, fmt.Errorf("unsupported MongoDB operator: %s", op)
+					}
+
+					if cond != nil {
+						conditions = append(conditions, cond)
+						slog.Debug("[FILTER-DEBUG] Added operator condition",
+							"key", key,
+							"operator", op,
+							"totalConditions", len(conditions))
 					}
 				}
 			} else {
+				slog.Debug("[FILTER-DEBUG] Using simple equality",
+					"key", key,
+					"value", value)
+
 				// Simple equality
-				builder.Build(query.Eq(key, value))
+				conditions = append(conditions, query.Eq(key, value))
+				slog.Debug("[FILTER-DEBUG] Added equality condition",
+					"key", key,
+					"totalConditions", len(conditions))
 			}
 		}
 
+		// Combine all conditions with AND
+		var finalCondition query.Condition
+
+		if len(conditions) == 1 {
+			finalCondition = conditions[0]
+		} else if len(conditions) > 1 {
+			finalCondition = query.And(conditions...)
+		}
+
+		builder := query.New().Build(finalCondition)
 		whereClause, filterArgs := builder.ToSQLWithOffset(paramOffset)
+		slog.Debug("[FILTER-DEBUG] Final WHERE clause",
+			"whereClause", whereClause,
+			"filterArgsCount", len(filterArgs),
+			"filterArgs", filterArgs)
 
 		return whereClause, filterArgs, nil
 	}
+
+	slog.Error("[FILTER-DEBUG] Unsupported filter type",
+		"filterType", fmt.Sprintf("%T", filter))
 
 	return "", nil, fmt.Errorf("unsupported filter type: %T", filter)
 }
@@ -426,6 +484,14 @@ func (c *PostgreSQLDatabaseClient) convertUpdateToSetClause(
 func (c *PostgreSQLDatabaseClient) updateDocuments(
 	ctx context.Context, filter interface{}, update interface{}, updateMany bool,
 ) (*client.UpdateResult, error) {
+	slog.Debug("[UPDATE-DEBUG] updateDocuments called",
+		"tableName", c.tableName,
+		"updateMany", updateMany,
+		"filterType", fmt.Sprintf("%T", filter),
+		"filter", filter,
+		"updateType", fmt.Sprintf("%T", update),
+		"update", update)
+
 	// Convert update to SQL SET clause first (starts from $1)
 	setClause, updateArgs, err := c.convertUpdateToSetClause(update)
 	if err != nil {
@@ -552,11 +618,17 @@ func convertMongoSortToSQL(sortOptions interface{}) string {
 
 		if field == "createdAt" || field == "updatedAt" || field == "_id" || field == "id" {
 			// Use direct column access for known fields
-			if field == "_id" {
-				field = "id"
+			// Convert to snake_case for PostgreSQL columns
+			switch field {
+			case "createdAt":
+				fieldSQL = "created_at"
+			case "updatedAt":
+				fieldSQL = "updated_at"
+			case "_id":
+				fieldSQL = "id"
+			default:
+				fieldSQL = field
 			}
-
-			fieldSQL = field
 		} else {
 			// For nested fields, use JSONB operators
 			fieldSQL = fmt.Sprintf("document->>'%s'", field)
@@ -574,10 +646,16 @@ func convertMongoSortToSQL(sortOptions interface{}) string {
 
 // FindOne finds a single document matching the filter
 //
-//nolint:cyclop // Complexity is acceptable for handling multiple filter types
+//nolint:cyclop,gocognit,nestif,dupl // Acceptable complexity for filter conversion with MongoDB operators
 func (c *PostgreSQLDatabaseClient) FindOne(
 	ctx context.Context, filter interface{}, options *client.FindOneOptions,
 ) (client.SingleResult, error) {
+	slog.Debug("[FINDONE-DEBUG] FindOne called",
+		"tableName", c.tableName,
+		"filterType", fmt.Sprintf("%T", filter),
+		"filter", filter,
+		"hasOptions", options != nil)
+
 	// Convert filter to SQL WHERE clause
 	var whereClause string
 
@@ -586,27 +664,117 @@ func (c *PostgreSQLDatabaseClient) FindOne(
 	//nolint:nestif // Nested complexity required for handling MongoDB-style filters
 	if builder, ok := filter.(*query.Builder); ok {
 		whereClause, args = builder.ToSQL()
+		slog.Debug("[FINDONE-DEBUG] Using Builder path",
+			"whereClause", whereClause,
+			"argsCount", len(args))
 	} else if filterMap, ok := filter.(map[string]interface{}); ok {
+		slog.Debug("[FINDONE-DEBUG] Processing filterMap",
+			"filterMap", filterMap,
+			"keyCount", len(filterMap))
+
 		// Handle both simple equality and MongoDB-style filters
-		builder := query.New()
+		// Collect all conditions and combine them with AND
+		var conditions []query.Condition
 
 		for key, value := range filterMap {
+			slog.Debug("[FINDONE-DEBUG] Processing filter key",
+				"key", key,
+				"valueType", fmt.Sprintf("%T", value))
+
 			// Check if value is a MongoDB operator map (e.g., {"$in": [...]})
 			if valueMap, isMap := value.(map[string]interface{}); isMap {
+				slog.Debug("[FINDONE-DEBUG] Found operator map",
+					"key", key,
+					"operators", valueMap)
+
 				// Parse MongoDB operators
 				for op, opValue := range valueMap {
-					if err := c.parseMongoOperator(builder, key, op, opValue); err != nil {
-						return nil, err
+					slog.Debug("[FINDONE-DEBUG] Processing operator",
+						"key", key,
+						"operator", op,
+						"opValueType", fmt.Sprintf("%T", opValue))
+
+					// Create condition directly based on operator
+					var cond query.Condition
+
+					switch op {
+					case "$ne":
+						cond = query.Ne(key, opValue)
+					case "$eq":
+						cond = query.Eq(key, opValue)
+					case "$gt":
+						cond = query.Gt(key, opValue)
+					case "$gte":
+						cond = query.Gte(key, opValue)
+					case "$lt":
+						cond = query.Lt(key, opValue)
+					case "$lte":
+						cond = query.Lte(key, opValue)
+					case "$in":
+						if inValues, ok := opValue.([]interface{}); ok {
+							slog.Debug("[FINDONE-DEBUG] Creating In condition",
+								"key", key,
+								"valuesCount", len(inValues),
+								"values", inValues)
+							cond = query.In(key, inValues)
+						} else {
+							slog.Error("[FINDONE-DEBUG] $in operator type mismatch",
+								"key", key,
+								"expectedType", "[]interface{}",
+								"actualType", fmt.Sprintf("%T", opValue))
+
+							return nil, fmt.Errorf("$in operator requires array value")
+						}
+					default:
+						slog.Error("[FINDONE-DEBUG] Unsupported operator", "operator", op)
+
+						return nil, fmt.Errorf("unsupported MongoDB operator: %s", op)
+					}
+
+					if cond != nil {
+						conditions = append(conditions, cond)
+						slog.Debug("[FINDONE-DEBUG] Added condition",
+							"key", key,
+							"operator", op,
+							"totalConditions", len(conditions))
 					}
 				}
 			} else {
+				slog.Debug("[FINDONE-DEBUG] Using simple equality",
+					"key", key,
+					"value", value)
+
 				// Simple equality
-				builder.Build(query.Eq(key, value))
+				conditions = append(conditions, query.Eq(key, value))
+				slog.Debug("[FINDONE-DEBUG] Added equality condition",
+					"totalConditions", len(conditions))
 			}
 		}
 
+		// Combine all conditions with AND
+		var finalCondition query.Condition
+
+		if len(conditions) == 1 {
+			finalCondition = conditions[0]
+
+			slog.Debug("[FINDONE-DEBUG] Using single condition")
+		} else if len(conditions) > 1 {
+			finalCondition = query.And(conditions...)
+
+			slog.Debug("[FINDONE-DEBUG] Combined conditions with AND",
+				"conditionCount", len(conditions))
+		}
+
+		builder := query.New().Build(finalCondition)
 		whereClause, args = builder.ToSQL()
+		slog.Debug("[FINDONE-DEBUG] Generated WHERE clause",
+			"whereClause", whereClause,
+			"argsCount", len(args),
+			"args", args)
 	} else {
+		slog.Error("[FINDONE-DEBUG] Unsupported filter type",
+			"filterType", fmt.Sprintf("%T", filter))
+
 		return nil, fmt.Errorf("unsupported filter type")
 	}
 
@@ -615,28 +783,50 @@ func (c *PostgreSQLDatabaseClient) FindOne(
 
 	// Apply sort options if provided
 	if options != nil && options.Sort != nil {
-		sqlQuery += convertMongoSortToSQL(options.Sort)
+		sortClause := convertMongoSortToSQL(options.Sort)
+		slog.Debug("[FINDONE-DEBUG] Adding sort clause",
+			"sortOptions", options.Sort,
+			"sortClause", sortClause)
+		sqlQuery += sortClause
 	}
 
 	sqlQuery += " LIMIT 1"
+
+	slog.Info("[FINDONE-DEBUG] Executing SQL query",
+		"tableName", c.tableName,
+		"sqlQuery", sqlQuery,
+		"args", args,
+		"argsCount", len(args))
 
 	var jsonData []byte
 
 	err := c.db.QueryRowContext(ctx, sqlQuery, args...).Scan(&jsonData)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			slog.Warn("[FINDONE-DEBUG] No documents found",
+				"sqlQuery", sqlQuery,
+				"args", args)
+
 			return &postgresqlSingleResult{err: client.ErrNoDocuments}, nil
 		}
 
+		slog.Error("[FINDONE-DEBUG] Query execution failed",
+			"error", err,
+			"sqlQuery", sqlQuery,
+			"args", args)
+
 		return nil, fmt.Errorf("failed to query document: %w", err)
 	}
+
+	slog.Debug("[FINDONE-DEBUG] Document found",
+		"dataSize", len(jsonData))
 
 	return &postgresqlSingleResult{data: jsonData}, nil
 }
 
 // Find finds all documents matching the filter
 //
-//nolint:cyclop // Complexity is acceptable for handling multiple filter types
+//nolint:cyclop,gocognit,nestif,dupl // Acceptable complexity for filter conversion with MongoDB operators
 func (c *PostgreSQLDatabaseClient) Find(
 	ctx context.Context, filter interface{}, options *client.FindOptions,
 ) (client.Cursor, error) {
@@ -650,23 +840,60 @@ func (c *PostgreSQLDatabaseClient) Find(
 		whereClause, args = builder.ToSQL()
 	} else if filterMap, ok := filter.(map[string]interface{}); ok {
 		// Handle both simple equality and MongoDB-style filters
-		builder := query.New()
+		// Collect all conditions and combine them with AND
+		var conditions []query.Condition
 
 		for key, value := range filterMap {
 			// Check if value is a MongoDB operator map (e.g., {"$in": [...]})
 			if valueMap, isMap := value.(map[string]interface{}); isMap {
 				// Parse MongoDB operators
 				for op, opValue := range valueMap {
-					if err := c.parseMongoOperator(builder, key, op, opValue); err != nil {
-						return nil, err
+					// Create condition directly based on operator
+					var cond query.Condition
+
+					switch op {
+					case "$ne":
+						cond = query.Ne(key, opValue)
+					case "$eq":
+						cond = query.Eq(key, opValue)
+					case "$gt":
+						cond = query.Gt(key, opValue)
+					case "$gte":
+						cond = query.Gte(key, opValue)
+					case "$lt":
+						cond = query.Lt(key, opValue)
+					case "$lte":
+						cond = query.Lte(key, opValue)
+					case "$in":
+						if inValues, ok := opValue.([]interface{}); ok {
+							cond = query.In(key, inValues)
+						} else {
+							return nil, fmt.Errorf("$in operator requires array value")
+						}
+					default:
+						return nil, fmt.Errorf("unsupported MongoDB operator: %s", op)
+					}
+
+					if cond != nil {
+						conditions = append(conditions, cond)
 					}
 				}
 			} else {
 				// Simple equality
-				builder.Build(query.Eq(key, value))
+				conditions = append(conditions, query.Eq(key, value))
 			}
 		}
 
+		// Combine all conditions with AND
+		var finalCondition query.Condition
+
+		if len(conditions) == 1 {
+			finalCondition = conditions[0]
+		} else if len(conditions) > 1 {
+			finalCondition = query.And(conditions...)
+		}
+
+		builder := query.New().Build(finalCondition)
 		whereClause, args = builder.ToSQL()
 	} else {
 		whereClause = "TRUE" // No filter

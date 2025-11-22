@@ -415,11 +415,17 @@ func mongoFieldToJSONB(fieldPath string) string {
 		// If it's a column name (like "createdAt"), use it directly
 		// Map _id to id for PostgreSQL compatibility
 		if isColumnField(fieldPath) {
-			if fieldPath == "_id" {
+			// Convert MongoDB field names to PostgreSQL column names (snake_case)
+			switch fieldPath {
+			case "_id":
 				return "id"
+			case "createdAt":
+				return "created_at"
+			case "updatedAt":
+				return "updated_at"
+			default:
+				return fieldPath
 			}
-
-			return fieldPath
 		}
 
 		return fmt.Sprintf("document->>'%s'", fieldPath)
@@ -427,6 +433,11 @@ func mongoFieldToJSONB(fieldPath string) string {
 
 	// Split the path into parts
 	parts := strings.Split(fieldPath, ".")
+
+	// Check if final field needs dual-case support
+	if needsDualCaseLookup(parts[len(parts)-1]) {
+		return buildDualCaseJSONBPath(parts)
+	}
 
 	// Build JSONB path
 	// All intermediate parts use -> operator
@@ -445,6 +456,58 @@ func mongoFieldToJSONB(fieldPath string) string {
 	}
 
 	return jsonbPath.String()
+}
+
+// needsDualCaseLookup checks if a field name needs dual-case support (lowercase and camelCase)
+func needsDualCaseLookup(fieldName string) bool {
+	// Fields that might be stored in either lowercase or camelCase
+	dualCaseFields := map[string]bool{
+		"nodename":        true, // Can be nodename or nodeName
+		"nodequarantined": true, // Can be nodequarantined or nodeQuarantined
+	}
+
+	return dualCaseFields[strings.ToLower(fieldName)]
+}
+
+// buildDualCaseJSONBPath builds a COALESCE expression to handle both lowercase and camelCase
+func buildDualCaseJSONBPath(parts []string) string {
+	var basePath strings.Builder
+	basePath.WriteString("document")
+
+	// Build the base path up to the last element
+	for i := 0; i < len(parts)-1; i++ {
+		basePath.WriteString(fmt.Sprintf("->'%s'", parts[i]))
+	}
+
+	lastField := parts[len(parts)-1]
+	basePathStr := basePath.String()
+
+	// Try lowercase first, then camelCase
+	lowercaseField := strings.ToLower(lastField)
+	camelCaseField := toCamelCase(lowercaseField)
+
+	// Return COALESCE to try both cases
+	return fmt.Sprintf("COALESCE(%s->>'%s', %s->>'%s')",
+		basePathStr, lowercaseField,
+		basePathStr, camelCaseField)
+}
+
+// toCamelCase converts a lowercase field name to camelCase
+func toCamelCase(s string) string {
+	// Handle specific known conversions
+	switch s {
+	case "nodename":
+		return "nodeName"
+	case "nodequarantined":
+		return "nodeQuarantined"
+	default:
+		// Generic conversion: capitalize first letter after each word boundary
+		if len(s) == 0 {
+			return s
+		}
+
+		return s
+	}
 }
 
 // isColumnField checks if a field is a table column (not JSONB)

@@ -334,6 +334,7 @@ func (f *PipelineFilter) matchesMapValue(actualValue interface{}, expectedMap ma
 
 // matchesOperators processes MongoDB operator expressions
 func (f *PipelineFilter) matchesOperators(actualValue interface{}, operators map[string]interface{}) bool {
+	//nolint:goconst // MongoDB operator strings are clear as literals
 	for op, opValue := range operators {
 		switch op {
 		case "$in":
