@@ -512,7 +512,69 @@ func (c *PostgreSQLDatabaseClient) UpsertDocument(
 	}, nil
 }
 
+// convertMongoSortToSQL converts MongoDB-style sort options to SQL ORDER BY clause
+//
+//nolint:cyclop // Complexity is acceptable for handling multiple sort direction types
+func convertMongoSortToSQL(sortOptions interface{}) string {
+	const (
+		sqlAsc  = "ASC"
+		sqlDesc = "DESC"
+	)
+
+	sortMap, ok := sortOptions.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	var orderByClauses []string
+
+	for field, direction := range sortMap {
+		// Convert MongoDB-style direction (1 for ASC, -1 for DESC) to SQL
+		sqlDirection := sqlAsc
+
+		switch v := direction.(type) {
+		case int:
+			if v < 0 {
+				sqlDirection = sqlDesc
+			}
+		case int64:
+			if v < 0 {
+				sqlDirection = sqlDesc
+			}
+		case float64:
+			if v < 0 {
+				sqlDirection = sqlDesc
+			}
+		}
+
+		// Handle JSONB field paths
+		var fieldSQL string
+
+		if field == "createdAt" || field == "updatedAt" || field == "_id" || field == "id" {
+			// Use direct column access for known fields
+			if field == "_id" {
+				field = "id"
+			}
+
+			fieldSQL = field
+		} else {
+			// For nested fields, use JSONB operators
+			fieldSQL = fmt.Sprintf("document->>'%s'", field)
+		}
+
+		orderByClauses = append(orderByClauses, fmt.Sprintf("%s %s", fieldSQL, sqlDirection))
+	}
+
+	if len(orderByClauses) > 0 {
+		return " ORDER BY " + strings.Join(orderByClauses, ", ")
+	}
+
+	return ""
+}
+
 // FindOne finds a single document matching the filter
+//
+//nolint:cyclop // Complexity is acceptable for handling multiple filter types
 func (c *PostgreSQLDatabaseClient) FindOne(
 	ctx context.Context, filter interface{}, options *client.FindOneOptions,
 ) (client.SingleResult, error) {
@@ -521,12 +583,26 @@ func (c *PostgreSQLDatabaseClient) FindOne(
 
 	var args []interface{}
 
+	//nolint:nestif // Nested complexity required for handling MongoDB-style filters
 	if builder, ok := filter.(*query.Builder); ok {
 		whereClause, args = builder.ToSQL()
 	} else if filterMap, ok := filter.(map[string]interface{}); ok {
+		// Handle both simple equality and MongoDB-style filters
 		builder := query.New()
+
 		for key, value := range filterMap {
-			builder.Build(query.Eq(key, value))
+			// Check if value is a MongoDB operator map (e.g., {"$in": [...]})
+			if valueMap, isMap := value.(map[string]interface{}); isMap {
+				// Parse MongoDB operators
+				for op, opValue := range valueMap {
+					if err := c.parseMongoOperator(builder, key, op, opValue); err != nil {
+						return nil, err
+					}
+				}
+			} else {
+				// Simple equality
+				builder.Build(query.Eq(key, value))
+			}
 		}
 
 		whereClause, args = builder.ToSQL()
@@ -535,11 +611,18 @@ func (c *PostgreSQLDatabaseClient) FindOne(
 	}
 
 	//nolint:gosec // G201: table name is controlled internally, not from user input
-	query := fmt.Sprintf("SELECT document FROM %s WHERE %s LIMIT 1", c.tableName, whereClause)
+	sqlQuery := fmt.Sprintf("SELECT document FROM %s WHERE %s", c.tableName, whereClause)
+
+	// Apply sort options if provided
+	if options != nil && options.Sort != nil {
+		sqlQuery += convertMongoSortToSQL(options.Sort)
+	}
+
+	sqlQuery += " LIMIT 1"
 
 	var jsonData []byte
 
-	err := c.db.QueryRowContext(ctx, query, args...).Scan(&jsonData)
+	err := c.db.QueryRowContext(ctx, sqlQuery, args...).Scan(&jsonData)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &postgresqlSingleResult{err: client.ErrNoDocuments}, nil
@@ -552,6 +635,8 @@ func (c *PostgreSQLDatabaseClient) FindOne(
 }
 
 // Find finds all documents matching the filter
+//
+//nolint:cyclop // Complexity is acceptable for handling multiple filter types
 func (c *PostgreSQLDatabaseClient) Find(
 	ctx context.Context, filter interface{}, options *client.FindOptions,
 ) (client.Cursor, error) {
@@ -560,12 +645,26 @@ func (c *PostgreSQLDatabaseClient) Find(
 
 	var args []interface{}
 
+	//nolint:nestif // Nested complexity required for handling MongoDB-style filters
 	if builder, ok := filter.(*query.Builder); ok {
 		whereClause, args = builder.ToSQL()
 	} else if filterMap, ok := filter.(map[string]interface{}); ok {
+		// Handle both simple equality and MongoDB-style filters
 		builder := query.New()
+
 		for key, value := range filterMap {
-			builder.Build(query.Eq(key, value))
+			// Check if value is a MongoDB operator map (e.g., {"$in": [...]})
+			if valueMap, isMap := value.(map[string]interface{}); isMap {
+				// Parse MongoDB operators
+				for op, opValue := range valueMap {
+					if err := c.parseMongoOperator(builder, key, op, opValue); err != nil {
+						return nil, err
+					}
+				}
+			} else {
+				// Simple equality
+				builder.Build(query.Eq(key, value))
+			}
 		}
 
 		whereClause, args = builder.ToSQL()

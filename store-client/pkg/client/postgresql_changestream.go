@@ -87,13 +87,19 @@ func (e *postgresqlEvent) GetRecordUUID() (string, error) {
 	return e.recordID, nil
 }
 
+//nolint:cyclop,gocognit // Complexity acceptable for dual-case field name lookups (MongoDB vs PostgreSQL)
 func (e *postgresqlEvent) GetNodeName() (string, error) {
 	// Try to extract node name from new values (INSERT/UPDATE)
 	//nolint:nestif // Nested complexity 8: required for extracting node name from JSONB structure
 	if e.newValues != nil {
 		if document, ok := e.newValues["document"].(map[string]interface{}); ok {
 			if healthEvent, ok := document["healthevent"].(map[string]interface{}); ok {
+				// Try lowercase first (MongoDB compatibility)
 				if nodeName, ok := healthEvent["nodename"].(string); ok {
+					return nodeName, nil
+				}
+				// Try camelCase (PostgreSQL JSON)
+				if nodeName, ok := healthEvent["nodeName"].(string); ok {
 					return nodeName, nil
 				}
 			}
@@ -109,7 +115,12 @@ func (e *postgresqlEvent) GetNodeName() (string, error) {
 	if e.oldValues != nil {
 		if document, ok := e.oldValues["document"].(map[string]interface{}); ok {
 			if healthEvent, ok := document["healthevent"].(map[string]interface{}); ok {
+				// Try lowercase first (MongoDB compatibility)
 				if nodeName, ok := healthEvent["nodename"].(string); ok {
+					return nodeName, nil
+				}
+				// Try camelCase (PostgreSQL JSON)
+				if nodeName, ok := healthEvent["nodeName"].(string); ok {
 					return nodeName, nil
 				}
 			}

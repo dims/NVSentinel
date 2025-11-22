@@ -301,6 +301,10 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 	ctx context.Context,
 	nodeName string,
 ) error {
+	slog.Info("[CANCEL-EVENTS] Starting CancelLatestQuarantiningEvents",
+		"node", nodeName,
+		"databaseClientIsNil", w.databaseClient == nil)
+
 	// Find the latest Quarantined or UnQuarantined event to check current state of node
 	filter := map[string]interface{}{
 		"healthevent.nodename": nodeName,
@@ -313,6 +317,10 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 		Sort: map[string]interface{}{"createdAt": -1},
 	}
 
+	slog.Info("[CANCEL-EVENTS] Searching for latest quarantining event",
+		"node", nodeName,
+		"filter", filter)
+
 	var latestEvent struct {
 		ID                string    `bson:"_id"`
 		CreatedAt         time.Time `bson:"createdAt"`
@@ -324,21 +332,42 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 	result, err := w.databaseClient.FindOne(ctx, filter, findOptions)
 	if err != nil {
 		if errors.Is(err, client.ErrNoDocuments) {
-			slog.Warn("No quarantining/unquarantining events found for node", "node", nodeName)
+			slog.Warn("[CANCEL-EVENTS] No quarantining/unquarantining events found for node",
+				"node", nodeName,
+				"reason", "No documents match filter")
+
 			return nil
 		}
+
+		slog.Error("[CANCEL-EVENTS] Error finding latest quarantining event",
+			"node", nodeName,
+			"error", err,
+			"errorType", fmt.Sprintf("%T", err))
 
 		return fmt.Errorf("error finding latest quarantining event for node %s: %w", nodeName, err)
 	}
 
 	if err := result.Decode(&latestEvent); err != nil {
+		slog.Error("[CANCEL-EVENTS] Error decoding latest event",
+			"node", nodeName,
+			"error", err)
+
 		return fmt.Errorf("error decoding latest quarantining event for node %s: %w", nodeName, err)
 	}
+
+	slog.Info("[CANCEL-EVENTS] Found latest event",
+		"node", nodeName,
+		"eventID", latestEvent.ID,
+		"createdAt", latestEvent.CreatedAt,
+		"nodeQuarantined", latestEvent.HealthEventStatus.NodeQuarantined)
 
 	// Only cancel if latest status is Quarantined (not if already UnQuarantined by healthy event)
 	if latestEvent.HealthEventStatus.NodeQuarantined == nil ||
 		*latestEvent.HealthEventStatus.NodeQuarantined != model.Quarantined {
-		slog.Info("No latest quarantining event found for node, no events to cancel", "node", nodeName)
+		slog.Info("[CANCEL-EVENTS] Latest event is not Quarantined, no events to cancel",
+			"node", nodeName,
+			"latestStatus", latestEvent.HealthEventStatus.NodeQuarantined)
+
 		return nil
 	}
 
@@ -357,6 +386,11 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 			"healtheventstatus.nodequarantined": model.Cancelled,
 		},
 	}
+
+	slog.Info("[CANCEL-EVENTS] Prepared UPDATE filter and operation",
+		"node", nodeName,
+		"updateFilter", updateFilter,
+		"update", update)
 
 	updateResult, err := w.databaseClient.UpdateManyDocuments(ctx, updateFilter, update)
 	if err != nil {

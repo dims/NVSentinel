@@ -558,7 +558,11 @@ func extractEventInfo(event datastore.EventWithToken) (string, interface{}) {
 
 	if fullDoc, ok := event.Event["fullDocument"].(map[string]interface{}); ok {
 		if healthevent, ok := fullDoc["healthevent"].(map[string]interface{}); ok {
+			// Try exact match first (case-sensitive)
 			if name, ok := healthevent["nodename"].(string); ok {
+				nodeName = name
+			} else if name, ok := healthevent["nodeName"].(string); ok {
+				// Fall back to camelCase (PostgreSQL uses camelCase JSON tags)
 				nodeName = name
 			}
 		}
@@ -879,9 +883,15 @@ func getMapKeys(m map[string]interface{}) []string {
 
 // GetNodeName extracts the node name from the event's fullDocument
 func (e *PostgreSQLEventAdapter) GetNodeName() (string, error) {
+	//nolint:nestif // Nested complexity required for dual-case field name lookups
 	if fullDoc, ok := e.eventData["fullDocument"].(map[string]interface{}); ok {
 		if healthEvent, ok := fullDoc["healthevent"].(map[string]interface{}); ok {
+			// Try lowercase first (MongoDB compatibility)
 			if nodeName, ok := healthEvent["nodename"].(string); ok {
+				return nodeName, nil
+			}
+			// Try camelCase (PostgreSQL JSON)
+			if nodeName, ok := healthEvent["nodeName"].(string); ok {
 				return nodeName, nil
 			}
 		}

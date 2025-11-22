@@ -208,26 +208,50 @@ func (ni *NodeInformer) handleUpdateNodeWrapper(oldObj, newObj interface{}) {
 
 // detectAndHandleManualUncordon checks if a node was manually uncordoned and handles it
 func (ni *NodeInformer) detectAndHandleManualUncordon(oldNode, newNode *v1.Node) bool {
+	slog.Debug("[NODE-INFORMER] Checking for manual uncordon",
+		"node", newNode.Name,
+		"oldUnschedulable", oldNode.Spec.Unschedulable,
+		"newUnschedulable", newNode.Spec.Unschedulable)
+
 	// Check if node transitioned from unschedulable to schedulable
 	if !oldNode.Spec.Unschedulable || newNode.Spec.Unschedulable {
 		return false
 	}
 
+	slog.Info("[NODE-INFORMER] Node transitioned from cordoned to uncordoned",
+		"node", newNode.Name,
+		"oldUnschedulable", oldNode.Spec.Unschedulable,
+		"newUnschedulable", newNode.Spec.Unschedulable)
+
 	// Check if node has FQ quarantine annotations
 	_, hasCordonAnnotation := newNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey]
 	if !hasCordonAnnotation {
+		slog.Info(
+			"[NODE-INFORMER] Node was uncordoned but has no FQ quarantine annotation",
+			"node", newNode.Name)
+
 		return false
 	}
 
-	slog.Info("Detected manual uncordon of FQ-quarantined node", "node", newNode.Name)
+	slog.Info("[NODE-INFORMER] Detected manual uncordon of FQ-quarantined node",
+		"node", newNode.Name,
+		"annotations", newNode.Annotations)
 
 	if ni.onManualUncordon != nil {
+		slog.Info("[NODE-INFORMER] Invoking manual uncordon callback", "node", newNode.Name)
+
 		if err := ni.onManualUncordon(newNode.Name); err != nil {
-			slog.Error("Failed to handle manual uncordon for node", "node", newNode.Name, "error", err)
+			slog.Error("[NODE-INFORMER] Manual uncordon callback failed",
+				"node", newNode.Name,
+				"error", err,
+				"errorType", fmt.Sprintf("%T", err))
+		} else {
+			slog.Info("[NODE-INFORMER] Manual uncordon callback completed successfully", "node", newNode.Name)
 		}
 	} else {
-		slog.Warn("Manual uncordon callback not registered for node - manual uncordon will not be handled",
-			"node", newNode.Name)
+		slog.Warn("[NODE-INFORMER] Manual uncordon callback is NOT REGISTERED - manual uncordon will NOT be handled!",
+			"node", newNode.Name,
+			"impact", "Node cleanup will not happen, database will not be updated")
 	}
 
 	return true

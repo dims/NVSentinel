@@ -143,7 +143,11 @@ func (f *PipelineFilter) MatchesEvent(event datastore.EventWithToken) bool {
 
 		if fullDoc, ok := event.Event["fullDocument"].(map[string]interface{}); ok {
 			if healthevent, ok := fullDoc["healthevent"].(map[string]interface{}); ok {
+				// Try lowercase first (MongoDB compatibility)
 				if name, ok := healthevent["nodename"].(string); ok {
+					nodeName = name
+				} else if name, ok := healthevent["nodeName"].(string); ok {
+					// Try camelCase (PostgreSQL JSON)
 					nodeName = name
 				}
 			}
