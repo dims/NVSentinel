@@ -127,7 +127,8 @@ func initializeDatastore(ctx context.Context) (*helper.DatastoreClientBundle, bo
 		return nil, false, fmt.Errorf("failed to load datastore config: %w", err)
 	}
 
-	pipeline := client.BuildAllHealthEventInsertsPipeline()
+	builder := client.GetPipelineBuilder()
+	pipeline := builder.BuildAllHealthEventInsertsPipeline()
 
 	bundle, err := helper.NewDatastoreClientFromConfig(ctx, "event-exporter", *datastoreConfig, pipeline)
 	if err != nil {
