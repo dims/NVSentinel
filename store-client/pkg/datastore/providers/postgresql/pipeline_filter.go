@@ -486,13 +486,37 @@ func (f *PipelineFilter) matchesLessThanOrEqual(actual, expected interface{}) bo
 
 // getFieldValue extracts a field value from an event using a dot-separated path
 // e.g., "operationType" or "fullDocument.healthevent.isfatal"
+// Performs case-insensitive key matching to handle MongoDB (lowercase) vs PostgreSQL (camelCase) differences
 func (f *PipelineFilter) getFieldValue(event map[string]interface{}, fieldPath string) interface{} {
 	parts := strings.Split(fieldPath, ".")
 	current := interface{}(event)
 
 	for _, part := range parts {
 		if currentMap, ok := current.(map[string]interface{}); ok {
-			current = currentMap[part]
+			// Try exact match first (fast path)
+			if value, exists := currentMap[part]; exists {
+				current = value
+				continue
+			}
+
+			// Fall back to case-insensitive match for MongoDB/PostgreSQL compatibility
+			// MongoDB uses lowercase bson tags (ishealthy, isfatal)
+			// PostgreSQL uses camelCase json tags (isHealthy, isFatal)
+			found := false
+			lowerPart := strings.ToLower(part)
+
+			for key, value := range currentMap {
+				if strings.ToLower(key) == lowerPart {
+					current = value
+					found = true
+
+					break
+				}
+			}
+
+			if !found {
+				return nil // Path doesn't exist
+			}
 		} else {
 			return nil // Path doesn't exist
 		}

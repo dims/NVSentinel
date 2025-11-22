@@ -228,33 +228,105 @@ func (p *PostgreSQLHealthEventStore) insertHealthEventRecord(
 func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatus(
 	ctx context.Context, id string, status datastore.HealthEventStatus,
 ) error {
-	var nodeQuarantined *string
+	slog.Info("[POSTGRESQL-UPDATE-DEBUG] UpdateHealthEventStatus CALLED",
+		"id", id,
+		"fault_remediated", status.FaultRemediated,
+		"node_quarantined", status.NodeQuarantined)
+
+	// PostgreSQL stores health event status in BOTH table columns AND the JSONB document.
+	// We must update BOTH to keep them in sync for aggregation pipelines to work correctly.
+	// Aggregation rules query the JSONB document, not the table columns.
+	//
+	// IMPORTANT: When nodeQuarantined is NULL, we need to pass it differently to avoid
+	// "inconsistent types deduced for parameter" errors.
+	var query string
+
+	var params []interface{}
 
 	if status.NodeQuarantined != nil {
+		// NodeQuarantined has a value - update it in both column and JSONB
 		statusStr := string(*status.NodeQuarantined)
-		nodeQuarantined = &statusStr
+		//nolint:dupword // SQL query uses nested jsonb_set calls
+		query = `
+			UPDATE health_events
+			SET node_quarantined = $1::text,
+			    user_pods_eviction_status = $2::text,
+			    user_pods_eviction_message = $3::text,
+			    fault_remediated = $4::boolean,
+			    last_remediation_timestamp = $5::timestamp,
+			    document = jsonb_set(
+			        jsonb_set(
+			            jsonb_set(
+			                jsonb_set(
+			                    document,
+			                    '{healtheventstatus,nodequarantined}',
+			                    to_jsonb($1::text)
+			                ),
+			                '{healtheventstatus,userpodsevictionstatus,status}',
+			                to_jsonb($2::text)
+			            ),
+			            '{healtheventstatus,userpodsevictionstatus,message}',
+			            to_jsonb($3::text)
+			        ),
+			        '{healtheventstatus,faultremediated}',
+			        to_jsonb($4::boolean)
+			    ),
+			    updated_at = NOW()
+			WHERE id = $6::uuid
+		`
+		params = []interface{}{
+			statusStr,
+			string(status.UserPodsEvictionStatus.Status),
+			status.UserPodsEvictionStatus.Message,
+			status.FaultRemediated,
+			status.LastRemediationTimestamp,
+			id,
+		}
+	} else {
+		// NodeQuarantined is NULL - only update other fields, skip nodequarantined in JSONB
+		//nolint:dupword // SQL query uses nested jsonb_set calls
+		query = `
+			UPDATE health_events
+			SET user_pods_eviction_status = $1::text,
+			    user_pods_eviction_message = $2::text,
+			    fault_remediated = $3::boolean,
+			    last_remediation_timestamp = $4::timestamp,
+			    document = jsonb_set(
+			        jsonb_set(
+			            jsonb_set(
+			                document,
+			                '{healtheventstatus,userpodsevictionstatus,status}',
+			                to_jsonb($1::text)
+			            ),
+			            '{healtheventstatus,userpodsevictionstatus,message}',
+			            to_jsonb($2::text)
+			        ),
+			        '{healtheventstatus,faultremediated}',
+			        to_jsonb($3::boolean)
+			    ),
+			    updated_at = NOW()
+			WHERE id = $5::uuid
+		`
+		params = []interface{}{
+			string(status.UserPodsEvictionStatus.Status),
+			status.UserPodsEvictionStatus.Message,
+			status.FaultRemediated,
+			status.LastRemediationTimestamp,
+			id,
+		}
 	}
 
-	query := `
-		UPDATE health_events
-		SET node_quarantined = $1,
-		    user_pods_eviction_status = $2,
-		    user_pods_eviction_message = $3,
-		    fault_remediated = $4,
-		    last_remediation_timestamp = $5,
-		    updated_at = NOW()
-		WHERE id = $6
-	`
+	slog.Info("[POSTGRESQL-UPDATE-DEBUG] Executing UPDATE query",
+		"id", id,
+		"fault_remediated_param", status.FaultRemediated,
+		"node_quarantined_nil", status.NodeQuarantined == nil)
 
-	result, err := p.db.ExecContext(ctx, query,
-		nodeQuarantined,
-		string(status.UserPodsEvictionStatus.Status),
-		status.UserPodsEvictionStatus.Message,
-		status.FaultRemediated,
-		status.LastRemediationTimestamp,
-		id,
-	)
+	result, err := p.db.ExecContext(ctx, query, params...)
 	if err != nil {
+		slog.Error("[POSTGRESQL-UPDATE-DEBUG] UPDATE query FAILED",
+			"id", id,
+			"error", err)
+
 		return fmt.Errorf("failed to update health event status: %w", err)
 	}
 
@@ -262,6 +334,10 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatus(
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
+
+	slog.Info("[POSTGRESQL-UPDATE-DEBUG] UPDATE query SUCCEEDED",
+		"id", id,
+		"rows_affected", rowsAffected)
 
 	if rowsAffected == 0 {
 		return fmt.Errorf("health event not found: %s", id)
@@ -522,9 +598,16 @@ func (p *PostgreSQLHealthEventStore) FindHealthEventsByStatus(
 func (p *PostgreSQLHealthEventStore) UpdateNodeQuarantineStatus(
 	ctx context.Context, eventID string, status datastore.Status,
 ) error {
+	// PostgreSQL stores health event status in BOTH table columns AND the JSONB document.
+	// We must update BOTH to keep them in sync for aggregation pipelines to work correctly.
 	query := `
 		UPDATE health_events
 		SET node_quarantined = $1,
+		    document = jsonb_set(
+		        document,
+		        '{healtheventstatus,nodequarantined}',
+		        to_jsonb($1::text)
+		    ),
 		    updated_at = NOW()
 		WHERE id = $2
 	`
@@ -550,10 +633,21 @@ func (p *PostgreSQLHealthEventStore) UpdateNodeQuarantineStatus(
 func (p *PostgreSQLHealthEventStore) UpdatePodEvictionStatus(
 	ctx context.Context, eventID string, status datastore.OperationStatus,
 ) error {
+	// PostgreSQL stores health event status in BOTH table columns AND the JSONB document.
+	// We must update BOTH to keep them in sync for aggregation pipelines to work correctly.
 	query := `
 		UPDATE health_events
 		SET user_pods_eviction_status = $1,
 		    user_pods_eviction_message = $2,
+		    document = 
+		        jsonb_set(jsonb_set(
+		                document,
+		            '{healtheventstatus,userpodsevictionstatus,status}',
+		            to_jsonb($1::text)
+		        ),
+		        '{healtheventstatus,userpodsevictionstatus,message}',
+		        to_jsonb($2::text)
+		    ),
 		    updated_at = NOW()
 		WHERE id = $3
 	`
@@ -592,10 +686,17 @@ func (p *PostgreSQLHealthEventStore) UpdateRemediationStatus(
 		return fmt.Errorf("invalid remediation status type: %T", status)
 	}
 
+	// PostgreSQL stores health event status in BOTH table columns AND the JSONB document.
+	// We must update BOTH to keep them in sync for aggregation pipelines to work correctly.
 	query := `
 		UPDATE health_events
 		SET fault_remediated = $1,
 		    last_remediation_timestamp = NOW(),
+		    document = jsonb_set(
+		        document,
+		        '{healtheventstatus,faultremediated}',
+		        to_jsonb($1::boolean)
+		    ),
 		    updated_at = NOW()
 		WHERE id = $2
 	`

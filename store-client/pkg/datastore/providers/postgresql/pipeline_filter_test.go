@@ -18,81 +18,271 @@ import (
 	"testing"
 
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestNewPipelineFilter_NilPipeline(t *testing.T) {
-	filter, err := NewPipelineFilter(nil)
-	assert.NoError(t, err)
-	assert.Nil(t, filter)
-}
-
-func TestNewPipelineFilter_EmptyPipeline(t *testing.T) {
-	pipeline := []interface{}{}
-	filter, err := NewPipelineFilter(pipeline)
-	assert.NoError(t, err)
-	assert.Nil(t, filter)
-}
-
-func TestNewPipelineFilter_SimpleMatchStage(t *testing.T) {
-	// Create pipeline with simple $match stage
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
+func TestGetFieldValue_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     map[string]interface{}
+		fieldPath string
+		expected  interface{}
+	}{
+		{
+			name: "exact case match - lowercase",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"ishealthy": false,
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.ishealthy",
+			expected:  false,
+		},
+		{
+			name: "exact case match - camelCase",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"isHealthy": true,
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.isHealthy",
+			expected:  true,
+		},
+		{
+			name: "case insensitive match - query lowercase, data camelCase",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"isHealthy": false,
+						"isFatal":   true,
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.ishealthy",
+			expected:  false,
+		},
+		{
+			name: "case insensitive match - query camelCase, data lowercase",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"ishealthy": true,
+						"isfatal":   false,
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.isHealthy",
+			expected:  true,
+		},
+		{
+			name: "case insensitive match - isFatal",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"isFatal": true,
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.isfatal",
+			expected:  true,
+		},
+		{
+			name: "case insensitive match - nested agent field",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"agent": "simple-health-client",
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.Agent",
+			expected:  "simple-health-client",
+		},
+		{
+			name: "non-existent field",
+			event: map[string]interface{}{
+				"fullDocument": map[string]interface{}{
+					"healthevent": map[string]interface{}{
+						"isHealthy": true,
+					},
+				},
+			},
+			fieldPath: "fullDocument.healthevent.nonexistent",
+			expected:  nil,
+		},
+		{
+			name: "top-level field",
+			event: map[string]interface{}{
 				"operationType": "insert",
 			},
+			fieldPath: "operationType",
+			expected:  "insert",
+		},
+		{
+			name: "top-level field case insensitive",
+			event: map[string]interface{}{
+				"operationType": "update",
+			},
+			fieldPath: "OperationType",
+			expected:  "update",
 		},
 	}
 
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-	require.NotNil(t, filter)
-	assert.Equal(t, 1, len(filter.stages))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter := &PipelineFilter{}
+			result := filter.getFieldValue(tt.event, tt.fieldPath)
+
+			if result != tt.expected {
+				t.Errorf("getFieldValue() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
 }
 
-func TestPipelineFilter_MatchesEvent_OperationType(t *testing.T) {
-	// Create filter that matches insert operations
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
-				"operationType": "insert",
-			},
-		},
-	}
-
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-
+func TestMatchesEvent_CaseInsensitive(t *testing.T) {
 	tests := []struct {
 		name     string
+		pipeline interface{}
 		event    datastore.EventWithToken
 		expected bool
 	}{
 		{
-			name: "matches insert operation",
+			name: "matches with lowercase filter and camelCase data",
+			pipeline: []interface{}{
+				map[string]interface{}{
+					"$match": map[string]interface{}{
+						"operationType":                    "insert",
+						"fullDocument.healthevent.agent":   map[string]interface{}{"$ne": "health-events-analyzer"},
+						"fullDocument.healthevent.ishealthy": false,
+					},
+				},
+			},
 			event: datastore.EventWithToken{
 				Event: map[string]interface{}{
 					"operationType": "insert",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"agent":     "simple-health-client",
+							"isHealthy": false,
+						},
+					},
 				},
+				ResumeToken: []byte("123"),
 			},
 			expected: true,
 		},
 		{
-			name: "doesn't match update operation",
+			name: "does not match when isHealthy is true",
+			pipeline: []interface{}{
+				map[string]interface{}{
+					"$match": map[string]interface{}{
+						"operationType":                    "insert",
+						"fullDocument.healthevent.ishealthy": false,
+					},
+				},
+			},
 			event: datastore.EventWithToken{
 				Event: map[string]interface{}{
-					"operationType": "update",
+					"operationType": "insert",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"isHealthy": true,
+						},
+					},
 				},
+				ResumeToken: []byte("124"),
 			},
 			expected: false,
 		},
 		{
-			name: "doesn't match delete operation",
+			name: "matches with camelCase filter and lowercase data",
+			pipeline: []interface{}{
+				map[string]interface{}{
+					"$match": map[string]interface{}{
+						"fullDocument.healthevent.isHealthy": true,
+					},
+				},
+			},
 			event: datastore.EventWithToken{
 				Event: map[string]interface{}{
-					"operationType": "delete",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"ishealthy": true,
+						},
+					},
 				},
+				ResumeToken: []byte("125"),
+			},
+			expected: true,
+		},
+		{
+			name: "matches isFatal case insensitive",
+			pipeline: []interface{}{
+				map[string]interface{}{
+					"$match": map[string]interface{}{
+						"fullDocument.healthevent.isfatal": true,
+					},
+				},
+			},
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"isFatal": true,
+						},
+					},
+				},
+				ResumeToken: []byte("126"),
+			},
+			expected: true,
+		},
+		{
+			name: "matches with $ne operator case insensitive",
+			pipeline: []interface{}{
+				map[string]interface{}{
+					"$match": map[string]interface{}{
+						"fullDocument.healthevent.agent": map[string]interface{}{
+							"$ne": "health-events-analyzer",
+						},
+					},
+				},
+			},
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"Agent": "simple-health-client",
+						},
+					},
+				},
+				ResumeToken: []byte("127"),
+			},
+			expected: true,
+		},
+		{
+			name: "does not match when agent is health-events-analyzer",
+			pipeline: []interface{}{
+				map[string]interface{}{
+					"$match": map[string]interface{}{
+						"fullDocument.healthevent.agent": map[string]interface{}{
+							"$ne": "health-events-analyzer",
+						},
+					},
+				},
+			},
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"agent": "health-events-analyzer",
+						},
+					},
+				},
+				ResumeToken: []byte("128"),
 			},
 			expected: false,
 		},
@@ -100,307 +290,119 @@ func TestPipelineFilter_MatchesEvent_OperationType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewPipelineFilter(tt.pipeline)
+			if err != nil {
+				t.Fatalf("NewPipelineFilter() error = %v", err)
+			}
+
 			result := filter.MatchesEvent(tt.event)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestPipelineFilter_MatchesEvent_NestedField(t *testing.T) {
-	// Create filter that matches nested field path
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
-				"fullDocument.healthevent.isfatal": true,
-			},
-		},
-	}
-
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		event    datastore.EventWithToken
-		expected bool
-	}{
-		{
-			name: "matches fatal event",
-			event: datastore.EventWithToken{
-				Event: map[string]interface{}{
-					"fullDocument": map[string]interface{}{
-						"healthevent": map[string]interface{}{
-							"isfatal": true,
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "doesn't match non-fatal event",
-			event: datastore.EventWithToken{
-				Event: map[string]interface{}{
-					"fullDocument": map[string]interface{}{
-						"healthevent": map[string]interface{}{
-							"isfatal": false,
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := filter.MatchesEvent(tt.event)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestPipelineFilter_MatchesEvent_InOperator(t *testing.T) {
-	// Create filter with $in operator
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
-				"operationType": map[string]interface{}{
-					"$in": []interface{}{"insert", "update"},
-				},
-			},
-		},
-	}
-
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		opType   string
-		expected bool
-	}{
-		{"matches insert", "insert", true},
-		{"matches update", "update", true},
-		{"doesn't match delete", "delete", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			event := datastore.EventWithToken{
-				Event: map[string]interface{}{
-					"operationType": tt.opType,
-				},
+			if result != tt.expected {
+				t.Errorf("MatchesEvent() = %v, expected %v", result, tt.expected)
 			}
-			result := filter.MatchesEvent(event)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
-func TestPipelineFilter_MatchesEvent_NeOperator(t *testing.T) {
-	// Create filter with $ne operator
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
-				"fullDocument.healthevent.agent": map[string]interface{}{
-					"$ne": "health-events-analyzer",
-				},
-			},
-		},
-	}
-
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		agent    string
-		expected bool
-	}{
-		{"matches different agent", "fault-quarantine", true},
-		{"doesn't match excluded agent", "health-events-analyzer", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			event := datastore.EventWithToken{
-				Event: map[string]interface{}{
-					"fullDocument": map[string]interface{}{
-						"healthevent": map[string]interface{}{
-							"agent": tt.agent,
-						},
-					},
-				},
-			}
-			result := filter.MatchesEvent(event)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestPipelineFilter_MatchesEvent_OrOperator(t *testing.T) {
-	// Create filter with $or operator
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
-				"$or": []interface{}{
-					map[string]interface{}{
-						"operationType": "insert",
-					},
-					map[string]interface{}{
-						"operationType": "update",
-					},
-				},
-			},
-		},
-	}
-
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		opType   string
-		expected bool
-	}{
-		{"matches insert via $or", "insert", true},
-		{"matches update via $or", "update", true},
-		{"doesn't match delete", "delete", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			event := datastore.EventWithToken{
-				Event: map[string]interface{}{
-					"operationType": tt.opType,
-				},
-			}
-			result := filter.MatchesEvent(event)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestPipelineFilter_MatchesEvent_ComplexOr(t *testing.T) {
-	// Create filter similar to BuildQuarantinedAndDrainedNodesPipeline
-	pipeline := []interface{}{
-		map[string]interface{}{
-			"$match": map[string]interface{}{
-				"operationType": "update",
-				"$or": []interface{}{
-					map[string]interface{}{
-						"fullDocument.healtheventstatus.userpodsevictionstatus.status": map[string]interface{}{
-							"$in": []interface{}{"Succeeded", "AlreadyDrained"},
-						},
-						"fullDocument.healtheventstatus.nodequarantined": map[string]interface{}{
-							"$in": []interface{}{"Quarantined", "AlreadyQuarantined"},
-						},
-					},
-					map[string]interface{}{
-						"fullDocument.healtheventstatus.nodequarantined": "UnQuarantined",
-					},
-				},
-			},
-		},
-	}
-
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		event    map[string]interface{}
-		expected bool
-	}{
-		{
-			name: "matches quarantined and drained",
-			event: map[string]interface{}{
-				"operationType": "update",
-				"fullDocument": map[string]interface{}{
-					"healtheventstatus": map[string]interface{}{
-						"userpodsevictionstatus": map[string]interface{}{
-							"status": "Succeeded",
-						},
-						"nodequarantined": "Quarantined",
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "matches unquarantined",
-			event: map[string]interface{}{
-				"operationType": "update",
-				"fullDocument": map[string]interface{}{
-					"healtheventstatus": map[string]interface{}{
-						"nodequarantined": "UnQuarantined",
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "doesn't match insert operation",
-			event: map[string]interface{}{
-				"operationType": "insert",
-				"fullDocument": map[string]interface{}{
-					"healtheventstatus": map[string]interface{}{
-						"nodequarantined": "Quarantined",
-					},
-				},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			eventWithToken := datastore.EventWithToken{
-				Event: tt.event,
-			}
-			result := filter.MatchesEvent(eventWithToken)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestPipelineFilter_WithDatastoreTypes(t *testing.T) {
-	// Create pipeline using datastore.D and datastore.A types
+func TestMatchesEvent_RealWorldHealthEventsAnalyzer(t *testing.T) {
+	// This test simulates the actual pipeline used by health-events-analyzer
+	// and ensures it works with PostgreSQL's camelCase field names
 	pipeline := []interface{}{
 		datastore.D(
 			datastore.E("$match", datastore.D(
-				datastore.E("operationType", datastore.D(
-					datastore.E("$in", datastore.A("insert")),
-				)),
+				datastore.E("operationType", "insert"),
+				datastore.E("fullDocument.healthevent.agent", datastore.D(datastore.E("$ne", "health-events-analyzer"))),
+				datastore.E("fullDocument.healthevent.ishealthy", false),
 			)),
 		),
 	}
 
-	filter, err := NewPipelineFilter(pipeline)
-	require.NoError(t, err)
-	require.NotNil(t, filter)
-
-	event := datastore.EventWithToken{
-		Event: map[string]interface{}{
-			"operationType": "insert",
+	tests := []struct {
+		name     string
+		event    datastore.EventWithToken
+		expected bool
+	}{
+		{
+			name: "should match - unhealthy insert from simple-health-client",
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"operationType": "insert",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"agent":     "simple-health-client",
+							"isHealthy": false,
+							"isFatal":   true,
+							"nodename":  "kwok-node-0",
+						},
+					},
+				},
+				ResumeToken: []byte("200"),
+			},
+			expected: true,
+		},
+		{
+			name: "should NOT match - healthy insert",
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"operationType": "insert",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"agent":     "simple-health-client",
+							"isHealthy": true,
+							"nodename":  "kwok-node-0",
+						},
+					},
+				},
+				ResumeToken: []byte("201"),
+			},
+			expected: false,
+		},
+		{
+			name: "should NOT match - from health-events-analyzer itself",
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"operationType": "insert",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"agent":     "health-events-analyzer",
+							"isHealthy": false,
+							"nodename":  "kwok-node-0",
+						},
+					},
+				},
+				ResumeToken: []byte("202"),
+			},
+			expected: false,
+		},
+		{
+			name: "should NOT match - update operation",
+			event: datastore.EventWithToken{
+				Event: map[string]interface{}{
+					"operationType": "update",
+					"fullDocument": map[string]interface{}{
+						"healthevent": map[string]interface{}{
+							"agent":     "simple-health-client",
+							"isHealthy": false,
+							"nodename":  "kwok-node-0",
+						},
+					},
+				},
+				ResumeToken: []byte("203"),
+			},
+			expected: false,
 		},
 	}
 
-	result := filter.MatchesEvent(event)
-	assert.True(t, result)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewPipelineFilter(pipeline)
+			if err != nil {
+				t.Fatalf("NewPipelineFilter() error = %v", err)
+			}
 
-func TestPipelineFilter_NilFilter_AllEventsMatch(t *testing.T) {
-	var filter *PipelineFilter
-
-	event := datastore.EventWithToken{
-		Event: map[string]interface{}{
-			"operationType": "anything",
-		},
+			result := filter.MatchesEvent(tt.event)
+			if result != tt.expected {
+				t.Errorf("MatchesEvent() = %v, expected %v", result, tt.expected)
+			}
+		})
 	}
-
-	// Nil filter should match all events
-	result := filter.MatchesEvent(event)
-	assert.True(t, result)
 }

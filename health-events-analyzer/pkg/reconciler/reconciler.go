@@ -278,6 +278,11 @@ func (r *Reconciler) validateAllSequenceCriteria(ctx context.Context, rule confi
 	var result []map[string]interface{}
 
 	// Execute aggregation using store-client abstraction
+	slog.Info("[RULE-DEBUG-v1] Executing aggregation pipeline",
+		"rule_name", rule.Name,
+		"pipeline_stages_count", len(pipelineStages),
+		"event_nodename", healthEventWithStatus.HealthEvent.NodeName)
+
 	cursor, err := r.databaseClient.Aggregate(ctx, pipelineStages)
 	if err != nil {
 		slog.Error("Failed to execute aggregation pipeline", "error", err, "rule_name", rule.Name)
@@ -294,6 +299,12 @@ func (r *Reconciler) validateAllSequenceCriteria(ctx context.Context, rule confi
 
 		return false, fmt.Errorf("failed to decode cursor: %w", err)
 	}
+
+	slog.Info("[RULE-DEBUG-v1] Aggregation pipeline completed",
+		"rule_name", rule.Name,
+		"result_count", len(result),
+		"result", result,
+		"event_nodename", healthEventWithStatus.HealthEvent.NodeName)
 
 	// Check if we have results (rule matched)
 	if len(result) > 0 {
@@ -356,6 +367,13 @@ func (r *Reconciler) getPipelineStages(
 
 			return nil, fmt.Errorf("failed to parse stage %d: %w", i, err)
 		}
+
+		slog.Info("[RULE-DEBUG-v1] Parsed aggregation stage",
+			"rule_name", rule.Name,
+			"stage_index", i,
+			"original_stage", stageStr,
+			"parsed_stage", stageMap,
+			"event_nodename", healthEventWithStatus.HealthEvent.NodeName)
 
 		pipeline = append(pipeline, stageMap)
 	}
