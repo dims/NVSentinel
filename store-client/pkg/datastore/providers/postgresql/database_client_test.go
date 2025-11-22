@@ -84,6 +84,19 @@ func TestFindOneFilterGeneration(t *testing.T) {
 			expectError:  false,
 		},
 		{
+			name: "real-world case - CancelLatestQuarantiningEvents filter",
+			filter: map[string]interface{}{
+				"healthevent.nodename": "kwok-kata-test-node-1",
+				"healtheventstatus.nodequarantined": map[string]interface{}{
+					"$in": []interface{}{"Quarantined", "UnQuarantined"},
+				},
+			},
+			// Check for COALESCE in the output for dual-case support
+			expectedSQL:  "", // Will check components individually
+			expectedArgs: nil,
+			expectError:  false,
+		},
+		{
 			name: "invalid operator",
 			filter: map[string]interface{}{
 				"field": map[string]interface{}{
@@ -182,6 +195,27 @@ func TestFindOneFilterGeneration(t *testing.T) {
 					if !strings.Contains(whereClause, part) {
 						t.Errorf("Expected WHERE clause to contain '%s', got: %s", part, whereClause)
 					}
+				}
+			} else if tt.name == "real-world case - CancelLatestQuarantiningEvents filter" {
+				t.Logf("Real-world filter SQL: %s", whereClause)
+
+				// Check for dual-case COALESCE support
+				if !strings.Contains(whereClause, "COALESCE") {
+					t.Errorf("Expected WHERE clause to contain COALESCE for dual-case support, got: %s", whereClause)
+				}
+
+				// Check both nodename and nodequarantined are present
+				if !strings.Contains(whereClause, "nodename") {
+					t.Errorf("Expected WHERE clause to contain 'nodename', got: %s", whereClause)
+				}
+
+				if !strings.Contains(whereClause, "nodequarantined") {
+					t.Errorf("Expected WHERE clause to contain 'nodequarantined', got: %s", whereClause)
+				}
+
+				// Should have 3 args: nodename value + 2 IN values
+				if len(args) != 3 {
+					t.Errorf("Expected 3 args, got %d: %v", len(args), args)
 				}
 			} else if tt.expectedSQL != "" {
 				if whereClause != tt.expectedSQL {

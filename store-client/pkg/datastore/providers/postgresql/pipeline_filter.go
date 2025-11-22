@@ -15,6 +15,7 @@
 package postgresql
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -193,16 +194,39 @@ func (f *PipelineFilter) matchesStage(event map[string]interface{}, conditions m
 
 // matchesCondition checks if an event matches a specific condition
 func (f *PipelineFilter) matchesCondition(event map[string]interface{}, key string, expectedValue interface{}) bool {
+	slog.Info("[PIPELINE-MATCH-DEBUG] Checking condition",
+		"key", key,
+		"expectedValueType", fmt.Sprintf("%T", expectedValue))
+
 	// Handle MongoDB operators
 	switch key {
 	case "$or":
-		return f.matchesOr(event, expectedValue)
+		result := f.matchesOr(event, expectedValue)
+		slog.Info("[PIPELINE-MATCH-DEBUG] $or result", "matches", result)
+		return result
 	case "$and":
-		return f.matchesAnd(event, expectedValue)
+		result := f.matchesAnd(event, expectedValue)
+		slog.Info("[PIPELINE-MATCH-DEBUG] $and result", "matches", result)
+		return result
 	default:
 		// Handle field path matching (e.g., "operationType", "fullDocument.healthevent.isfatal")
 		actualValue := f.getFieldValue(event, key)
-		return f.matchesValue(actualValue, expectedValue)
+		
+		actualJSON, _ := json.Marshal(actualValue)
+		expectedJSON, _ := json.Marshal(expectedValue)
+		
+		slog.Info("[PIPELINE-MATCH-DEBUG] Field value comparison",
+			"key", key,
+			"actualValue", string(actualJSON),
+			"actualType", fmt.Sprintf("%T", actualValue),
+			"expectedValue", string(expectedJSON),
+			"expectedType", fmt.Sprintf("%T", expectedValue))
+		
+		result := f.matchesValue(actualValue, expectedValue)
+		slog.Info("[PIPELINE-MATCH-DEBUG] Field match result",
+			"key", key,
+			"matches", result)
+		return result
 	}
 }
 
@@ -284,28 +308,47 @@ func (f *PipelineFilter) matchesAnd(event map[string]interface{}, andConditions 
 //
 //nolint:cyclop // Value matching requires type-specific comparisons
 func (f *PipelineFilter) matchesValue(actualValue interface{}, expectedValue interface{}) bool {
+	slog.Info("[PIPELINE-VALUE-DEBUG] Comparing values",
+		"actualType", fmt.Sprintf("%T", actualValue),
+		"expectedType", fmt.Sprintf("%T", expectedValue))
+
 	// Handle MongoDB operators and nested field matching in expectedValue
 	if expectedMap, ok := expectedValue.(map[string]interface{}); ok {
+		slog.Info("[PIPELINE-VALUE-DEBUG] expectedValue is map[string]interface{}")
 		return f.matchesMapValue(actualValue, expectedMap)
 	}
 
 	// Try datastore.Document type
 	if expectedD, ok := expectedValue.(datastore.Document); ok {
+		slog.Info("[PIPELINE-VALUE-DEBUG] expectedValue is datastore.Document, converting",
+			"docLength", len(expectedD))
+
 		expectedMap := make(map[string]interface{})
 		for _, elem := range expectedD {
+			slog.Info("[PIPELINE-VALUE-DEBUG] Document element",
+				"key", elem.Key,
+				"valueType", fmt.Sprintf("%T", elem.Value))
 			expectedMap[elem.Key] = elem.Value
 		}
 
+		slog.Info("[PIPELINE-VALUE-DEBUG] Converted datastore.Document to map",
+			"mapKeys", getMapKeysFromInterface(expectedMap))
 		return f.matchesValue(actualValue, expectedMap)
 	}
 
 	// Direct value comparison
+	slog.Info("[PIPELINE-VALUE-DEBUG] Using direct comparison")
 	return f.matchesEqual(actualValue, expectedValue)
 }
 
 // matchesMapValue handles matching when expectedValue is a map
 // (either operators or nested field matching)
 func (f *PipelineFilter) matchesMapValue(actualValue interface{}, expectedMap map[string]interface{}) bool {
+	slog.Info("[PIPELINE-MAP-DEBUG] Entered matchesMapValue",
+		"actualValueType", fmt.Sprintf("%T", actualValue),
+		"expectedMapType", fmt.Sprintf("%T", expectedMap),
+		"expectedMapKeys", getMapKeysFromInterface(expectedMap))
+
 	// Check if this is an operator map (all keys start with $) or a nested field match
 	hasOperators := false
 	hasNonOperators := false
@@ -318,17 +361,24 @@ func (f *PipelineFilter) matchesMapValue(actualValue interface{}, expectedMap ma
 		}
 	}
 
+	slog.Info("[PIPELINE-MAP-DEBUG] Key analysis",
+		"hasOperators", hasOperators,
+		"hasNonOperators", hasNonOperators)
+
 	// If we have operators, process them
 	if hasOperators {
+		slog.Info("[PIPELINE-MAP-DEBUG] Processing operators")
 		return f.matchesOperators(actualValue, expectedMap)
 	}
 
 	// If we have non-operators, this is a nested field match
 	// e.g., {"healtheventstatus.nodequarantined": "Quarantined"}
 	if hasNonOperators {
+		slog.Info("[PIPELINE-MAP-DEBUG] Processing nested fields")
 		return f.matchesNestedFields(actualValue, expectedMap)
 	}
 
+	slog.Info("[PIPELINE-MAP-DEBUG] No operators or non-operators, returning true")
 	return true
 }
 
@@ -364,8 +414,14 @@ func (f *PipelineFilter) matchesOperators(actualValue interface{}, operators map
 func (f *PipelineFilter) matchesNestedFields(actualValue interface{}, expectedFields map[string]interface{}) bool {
 	actualMap, ok := actualValue.(map[string]interface{})
 	if !ok {
+		slog.Warn("[PIPELINE-NESTED-DEBUG] actualValue is not a map",
+			"actualType", fmt.Sprintf("%T", actualValue))
 		return false
 	}
+
+	slog.Info("[PIPELINE-NESTED-DEBUG] Matching nested fields",
+		"actualMapKeys", getMapKeysFromInterface(actualMap),
+		"expectedFieldsKeys", getMapKeysFromInterface(expectedFields))
 
 	// All expected fields must match
 	for fieldPath, expectedFieldValue := range expectedFields {
@@ -374,18 +430,40 @@ func (f *PipelineFilter) matchesNestedFields(actualValue interface{}, expectedFi
 		// "healtheventstatus.nodequarantined" instead of nested maps
 		var actualFieldValue interface{}
 		if directValue, exists := actualMap[fieldPath]; exists {
+			slog.Info("[PIPELINE-NESTED-DEBUG] Found direct key match",
+				"fieldPath", fieldPath,
+				"value", directValue)
 			actualFieldValue = directValue
 		} else {
 			// Fall back to dot-notation path navigation (for nested maps)
+			slog.Info("[PIPELINE-NESTED-DEBUG] No direct key, trying path navigation",
+				"fieldPath", fieldPath)
 			actualFieldValue = f.getFieldValue(actualMap, fieldPath)
+			slog.Info("[PIPELINE-NESTED-DEBUG] Path navigation result",
+				"fieldPath", fieldPath,
+				"value", actualFieldValue)
 		}
 
-		if !f.matchesValue(actualFieldValue, expectedFieldValue) {
+		match := f.matchesValue(actualFieldValue, expectedFieldValue)
+		slog.Info("[PIPELINE-NESTED-DEBUG] Field match result",
+			"fieldPath", fieldPath,
+			"matches", match)
+
+		if !match {
 			return false
 		}
 	}
 
 	return true
+}
+
+// Helper function to get map keys from interface{}
+func getMapKeysFromInterface(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // matchesIn checks if value is in array

@@ -87,16 +87,17 @@ func (w *PostgreSQLChangeStreamWatcher) MarkProcessed(ctx context.Context, token
 		return fmt.Errorf("invalid token format: %w", err)
 	}
 
-	// Mark events as processed in changelog
+	// Mark ONLY this specific event as processed (not all events <= eventID)
+	// This prevents marking filtered events as processed
 	query := `
 		UPDATE datastore_changelog
 		SET processed = TRUE
-		WHERE id <= $1 AND table_name = $2 AND processed = FALSE
+		WHERE id = $1 AND table_name = $2 AND processed = FALSE
 	`
 
 	_, err = w.db.ExecContext(ctx, query, eventID, w.tableName)
 	if err != nil {
-		return fmt.Errorf("failed to mark events as processed: %w", err)
+		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}
 
 	// Update resume position
@@ -239,12 +240,23 @@ func (w *PostgreSQLChangeStreamWatcher) processChangelogRows(rows *sql.Rows) ([]
 		}
 
 		events = append(events, eventWithToken)
-		w.lastEventID = id
+		
+		// DO NOT update lastEventID here - it will be updated in sendEventsToChannel
+		// after pipeline filtering, only for events that are actually sent
+		slog.Debug("[PROCESS-ROWS-DEBUG] Built event from changelog",
+			"client", w.clientName,
+			"changelogID", id,
+			"operationType", operation)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating changelog rows: %w", err)
 	}
+
+	slog.Info("[PROCESS-ROWS-DEBUG] Finished processing changelog rows",
+		"client", w.clientName,
+		"totalEvents", len(events),
+		"currentLastEventID", w.lastEventID)
 
 	return events, nil
 }
@@ -257,6 +269,12 @@ func (w *PostgreSQLChangeStreamWatcher) buildEventDocument(
 	oldValues, newValues sql.NullString,
 	changedAt time.Time,
 ) map[string]interface{} {
+	slog.Info("[BUILD-EVENT-DEBUG] Building event document",
+		"client", w.clientName,
+		"changelogID", id,
+		"recordID", recordID,
+		"operation", operation)
+
 	event := map[string]interface{}{
 		"_id": map[string]interface{}{
 			// Use changelog ID (not recordID) for _data field to maintain consistency
@@ -270,6 +288,14 @@ func (w *PostgreSQLChangeStreamWatcher) buildEventDocument(
 	}
 
 	w.addDocumentDataToEvent(event, recordID, operation, oldValues, newValues)
+
+	// DEBUG: Log the final event structure
+	eventJSON, _ := json.Marshal(event)
+	slog.Info("[BUILD-EVENT-DEBUG] Completed event document",
+		"client", w.clientName,
+		"changelogID", id,
+		"hasUpdateDescription", event["updateDescription"] != nil,
+		"event", string(eventJSON))
 
 	return event
 }
@@ -363,8 +389,14 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 						oldValuesJSON, _ := json.Marshal(oldDoc)
 						newValuesJSON, _ := json.Marshal(newDoc)
 
-						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - old_values", "old_values", string(oldValuesJSON))
-						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - new_values", "new_values", string(newValuesJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - old_values", 
+							"client", w.clientName,
+							"recordID", recordID,
+							"old_values", string(oldValuesJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - new_values", 
+							"client", w.clientName,
+							"recordID", recordID,
+							"new_values", string(newValuesJSON))
 
 						// For health_events table, extract the inner document field for comparison
 						var oldDocForComparison map[string]interface{}
@@ -384,14 +416,24 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 
 						newCmpJSON, _ := json.Marshal(newDocForComparison)
 
-						slog.Info("[CHANGESTREAM-DEBUG] Comparing oldDoc", "oldDoc", string(oldCmpJSON))
-						slog.Info("[CHANGESTREAM-DEBUG] Comparing newDoc", "newDoc", string(newCmpJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] Comparing oldDoc",
+							"client", w.clientName,
+							"recordID", recordID,
+							"oldDoc", string(oldCmpJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] Comparing newDoc",
+							"client", w.clientName,
+							"recordID", recordID,
+							"newDoc", string(newCmpJSON))
 
 						updatedFields := w.findUpdatedFields(oldDocForComparison, newDocForComparison)
 
 						// DEBUG: Log what findUpdatedFields returned
 						updatedFieldsJSON, _ := json.Marshal(updatedFields)
-						slog.Info("[CHANGESTREAM-DEBUG] findUpdatedFields returned", "updatedFields", string(updatedFieldsJSON))
+						slog.Info("[CHANGESTREAM-DEBUG] findUpdatedFields returned",
+							"client", w.clientName,
+							"recordID", recordID,
+							"updatedFields", string(updatedFieldsJSON),
+							"fieldCount", len(updatedFields))
 
 						if len(updatedFields) > 0 {
 							event["updateDescription"] = map[string]interface{}{
@@ -400,9 +442,14 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 
 							// DEBUG: Log the complete updateDescription
 							updateDescJSON, _ := json.Marshal(event["updateDescription"])
-							slog.Info("[CHANGESTREAM-DEBUG] updateDescription added to event", "updateDescription", string(updateDescJSON))
+							slog.Info("[CHANGESTREAM-DEBUG] updateDescription added to event",
+								"client", w.clientName,
+								"recordID", recordID,
+								"updateDescription", string(updateDescJSON))
 						} else {
-							slog.Info("[CHANGESTREAM-DEBUG] No updatedFields found, updateDescription not added")
+							slog.Warn("[CHANGESTREAM-DEBUG] No updatedFields found, updateDescription not added",
+								"client", w.clientName,
+								"recordID", recordID)
 						}
 					}
 				}
@@ -434,22 +481,50 @@ func (w *PostgreSQLChangeStreamWatcher) findUpdatedFields(
 ) map[string]interface{} {
 	updatedFields := make(map[string]interface{})
 
+	slog.Info("[FIND-UPDATED-DEBUG] Starting field comparison",
+		"client", w.clientName,
+		"oldDocKeys", getMapKeys(oldDoc),
+		"newDocKeys", getMapKeys(newDoc))
+
 	// Compare all fields in newDoc with oldDoc
 	for key, newValue := range newDoc {
 		oldValue, exists := oldDoc[key]
 
 		// Field is updated if it didn't exist before or if the value changed
 		if !exists || !w.valuesEqual(oldValue, newValue) {
+			slog.Info("[FIND-UPDATED-DEBUG] Field changed",
+				"client", w.clientName,
+				"key", key,
+				"existed", exists,
+				"valuesEqual", w.valuesEqual(oldValue, newValue))
+
 			// For nested objects, flatten them with dot notation
 			// e.g., healtheventstatus: {nodequarantined: "Quarantined"} becomes
 			// "healtheventstatus.nodequarantined": "Quarantined"
 			if newValueMap, ok := newValue.(map[string]interface{}); ok {
+				slog.Info("[FIND-UPDATED-DEBUG] Flattening nested map",
+					"client", w.clientName,
+					"key", key,
+					"nestedKeys", getMapKeys(newValueMap))
 				w.flattenMap("", key, newValueMap, oldValue, updatedFields)
 			} else {
+				slog.Info("[FIND-UPDATED-DEBUG] Adding simple field",
+					"client", w.clientName,
+					"key", key,
+					"value", newValue)
 				updatedFields[key] = newValue
 			}
+		} else {
+			slog.Debug("[FIND-UPDATED-DEBUG] Field unchanged, skipping",
+				"client", w.clientName,
+				"key", key)
 		}
 	}
+
+	slog.Info("[FIND-UPDATED-DEBUG] Field comparison complete",
+		"client", w.clientName,
+		"updatedFieldCount", len(updatedFields),
+		"updatedKeys", getMapKeys(updatedFields))
 
 	return updatedFields
 }
@@ -587,16 +662,27 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 		nodeName, operationType := extractEventInfo(event)
 
 		// Apply pipeline filter if configured
-		if w.pipelineFilter != nil && !w.pipelineFilter.MatchesEvent(event) {
-			slog.Warn("[CHANGESTREAM-DEBUG] Event filtered out by pipeline",
+		if w.pipelineFilter != nil {
+			// DEBUG: Log the event structure before filtering
+			eventJSON, _ := json.Marshal(event.Event)
+			slog.Info("[CHANGESTREAM-DEBUG] Before pipeline filter",
 				"client", w.clientName,
 				"token", string(event.ResumeToken),
 				"operationType", operationType,
-				"nodeName", nodeName)
+				"nodeName", nodeName,
+				"event", string(eventJSON))
 
-			filteredCount++
+			if !w.pipelineFilter.MatchesEvent(event) {
+				slog.Warn("[CHANGESTREAM-DEBUG] Event filtered out by pipeline",
+					"client", w.clientName,
+					"token", string(event.ResumeToken),
+					"operationType", operationType,
+					"nodeName", nodeName)
 
-			continue // Skip events that don't match the pipeline
+				filteredCount++
+
+				continue // Skip events that don't match the pipeline
+			}
 		}
 
 		slog.Info("[CHANGESTREAM-DEBUG] Sending event to channel",
@@ -605,13 +691,34 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 			"operationType", operationType,
 			"nodeName", nodeName)
 
+		// Extract event ID from resume token
+		eventIDStr := string(event.ResumeToken)
+		eventID, err := strconv.ParseInt(eventIDStr, 10, 64)
+		if err != nil {
+			slog.Error("[CHANGESTREAM-DEBUG] Failed to parse event ID from resume token",
+				"client", w.clientName,
+				"token", eventIDStr,
+				"error", err)
+			// Continue anyway - don't fail the whole send
+		}
+
 		select {
 		case w.events <- event:
 			sentCount++
 
-			slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully",
-				"client", w.clientName,
-				"token", string(event.ResumeToken))
+			// CRITICAL: Update lastEventID ONLY for events that are successfully sent
+			// This ensures filtered events don't advance the resume position
+			if err == nil {
+				w.lastEventID = eventID
+				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully, updated lastEventID",
+					"client", w.clientName,
+					"token", string(event.ResumeToken),
+					"lastEventID", eventID)
+			} else {
+				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully (but couldn't parse ID)",
+					"client", w.clientName,
+					"token", string(event.ResumeToken))
+			}
 		case <-ctx.Done():
 			slog.Warn("[CHANGESTREAM-DEBUG] Context cancelled while sending event",
 				"client", w.clientName)

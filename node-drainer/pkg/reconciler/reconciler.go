@@ -102,11 +102,23 @@ func (r *Reconciler) PreprocessAndEnqueueEvent(ctx context.Context, event client
 		return fmt.Errorf("failed to unmarshal event document: %w", err)
 	}
 
+	slog.Info("[ND-PREPROCESS-DEBUG] Preprocessing event",
+		"documentKeys", getMapKeys(document))
+
 	// Extract health event with status
 	healthEventWithStatus := model.HealthEventWithStatus{}
 	if err := unmarshalGenericEvent(document, &healthEventWithStatus); err != nil {
 		return fmt.Errorf("failed to extract health event with status: %w", err)
 	}
+
+	nodeName := healthEventWithStatus.HealthEvent.NodeName
+	nodeQuarantined := healthEventWithStatus.HealthEventStatus.NodeQuarantined
+	evictionStatus := healthEventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Status
+
+	slog.Info("[ND-PREPROCESS-DEBUG] Extracted health event",
+		"node", nodeName,
+		"nodeQuarantined", nodeQuarantined,
+		"evictionStatus", evictionStatus)
 
 	// Skip if already in terminal state
 	if isTerminalStatus(healthEventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Status) {
@@ -117,27 +129,63 @@ func (r *Reconciler) PreprocessAndEnqueueEvent(ctx context.Context, event client
 		return nil
 	}
 
-	nodeName := healthEventWithStatus.HealthEvent.NodeName
-
 	documentID, err := utils.ExtractDocumentIDNative(document)
 	if err != nil {
 		return fmt.Errorf("failed to extract document ID: %w", err)
 	}
 
+	slog.Info("[ND-PREPROCESS-DEBUG] Calling handleEventCancellation",
+		"node", nodeName,
+		"documentID", documentID,
+		"nodeQuarantined", nodeQuarantined)
+
 	// Handle cancellation logic (Cancelled/UnQuarantined events)
 	if shouldSkipDueToCancellation := r.handleEventCancellation(
 		documentID, nodeName, healthEventWithStatus.HealthEventStatus.NodeQuarantined); shouldSkipDueToCancellation {
+		slog.Info("[ND-PREPROCESS-DEBUG] Event skipped due to cancellation",
+			"node", nodeName,
+			"documentID", documentID)
+
 		return nil
 	}
+
+	slog.Info("[ND-PREPROCESS-DEBUG] Setting initial status and enqueueing",
+		"node", nodeName,
+		"documentID", documentID)
 
 	// Set initial status to InProgress and enqueue
 	return r.setInitialStatusAndEnqueue(ctx, document, documentID, nodeName)
 }
 
+// Helper function to get map keys
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	return keys
+}
+
 // handleEventCancellation handles Cancelled and UnQuarantined events
 // Returns true if the event should be skipped (not enqueued)
 func (r *Reconciler) handleEventCancellation(documentID interface{}, nodeName string, statusPtr *model.Status) bool {
+	slog.Info("[ND-CANCELLATION-DEBUG] handleEventCancellation called",
+		"node", nodeName,
+		"documentID", documentID,
+		"statusPtr", statusPtr,
+		"statusValue", func() string {
+			if statusPtr == nil {
+				return "nil"
+			}
+
+			return string(*statusPtr)
+		}())
+
 	if statusPtr == nil {
+		slog.Info("[ND-CANCELLATION-DEBUG] statusPtr is nil, returning false",
+			"node", nodeName)
+
 		return false
 	}
 
@@ -150,6 +198,10 @@ func (r *Reconciler) handleEventCancellation(documentID interface{}, nodeName st
 			"eventID", eventID)
 		r.HandleCancellation(eventID, nodeName, model.Cancelled)
 
+		slog.Info("[ND-CANCELLATION-DEBUG] Returning true to skip Cancelled event",
+			"node", nodeName,
+			"eventID", eventID)
+
 		return true
 	}
 
@@ -160,6 +212,10 @@ func (r *Reconciler) handleEventCancellation(documentID interface{}, nodeName st
 			"eventID", eventID)
 		r.HandleCancellation(eventID, nodeName, model.UnQuarantined)
 	}
+
+	slog.Info("[ND-CANCELLATION-DEBUG] Returning false, event not cancelled",
+		"node", nodeName,
+		"status", string(*statusPtr))
 
 	return false
 }
@@ -537,14 +593,36 @@ func (r *Reconciler) parseHealthEventFromEvent(event datastore.Event,
 }
 
 func (r *Reconciler) HandleCancellation(eventID string, nodeName string, status model.Status) {
+	slog.Info("[ND-HANDLE-CANCELLATION-DEBUG] HandleCancellation called",
+		"node", nodeName,
+		"eventID", eventID,
+		"status", string(status))
+
 	r.nodeEventsMapMu.Lock()
 	defer r.nodeEventsMapMu.Unlock()
+
+	// Log current state before modification
+	eventsMap, exists := r.nodeEventsMap[nodeName]
+	_, nodeCancelled := r.cancelledNodes[nodeName]
+	slog.Info("[ND-HANDLE-CANCELLATION-DEBUG] Current state",
+		"node", nodeName,
+		"eventsMapExists", exists,
+		"eventsMapSize", func() int {
+			if exists {
+				return len(eventsMap)
+			}
+
+			return 0
+		}(),
+		"nodeCancelled", nodeCancelled)
 
 	//nolint:exhaustive // we don't need to handle other statuses
 	switch status {
 	case model.Cancelled:
 		if r.nodeEventsMap[nodeName] == nil {
 			r.nodeEventsMap[nodeName] = make(eventStatusMap)
+			slog.Info("[ND-HANDLE-CANCELLATION-DEBUG] Created new events map for node",
+				"node", nodeName)
 		}
 
 		r.nodeEventsMap[nodeName][eventID] = model.Cancelled
@@ -563,6 +641,21 @@ func (r *Reconciler) HandleCancellation(eventID string, nodeName string, status 
 			}
 		}
 	}
+
+	// Log final state
+	eventsMap, exists = r.nodeEventsMap[nodeName]
+	_, nodeCancelled = r.cancelledNodes[nodeName]
+	slog.Info("[ND-HANDLE-CANCELLATION-DEBUG] Final state after cancellation",
+		"node", nodeName,
+		"eventsMapExists", exists,
+		"eventsMapSize", func() int {
+			if exists {
+				return len(eventsMap)
+			}
+
+			return 0
+		}(),
+		"nodeCancelled", nodeCancelled)
 }
 
 func (r *Reconciler) isEventCancelled(eventID string, nodeName string, nodeQuarantinedStatus *model.Status) bool {
