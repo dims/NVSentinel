@@ -294,7 +294,7 @@ func (w *PostgreSQLChangeStreamWatcher) Close(ctx context.Context) error {
 
 // pollChangelog polls the changelog table for new entries
 func (w *PostgreSQLChangeStreamWatcher) pollChangelog(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second) // Poll every second
+	ticker := time.NewTicker(10 * time.Millisecond) // Poll every 10ms for very low latency
 	defer ticker.Stop()
 
 	for {

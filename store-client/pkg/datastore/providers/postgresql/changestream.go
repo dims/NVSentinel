@@ -55,7 +55,7 @@ func NewPostgreSQLChangeStreamWatcher(
 		tableName:    tableName,
 		events:       make(chan datastore.EventWithToken, 100),
 		stopCh:       make(chan struct{}),
-		pollInterval: 500 * time.Millisecond, // Default poll interval (reduced for better latency)
+		pollInterval: 10 * time.Millisecond, // Aggressive poll interval for very low latency (10ms)
 	}
 }
 
@@ -697,6 +697,36 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 	for _, event := range events {
 		nodeName, operationType := extractEventInfo(event)
 
+		// Extract event ID from resume token for tracking
+		// CRITICAL FIX: Update lastEventID BEFORE filtering to prevent deadlock
+		// This ensures the changestream position advances even for filtered events,
+		// matching MongoDB's behavior where resume tokens advance independently of filtering.
+
+		eventIDStr := string(event.ResumeToken)
+
+		eventID, parseErr := strconv.ParseInt(eventIDStr, 10, 64)
+		if parseErr != nil {
+			slog.Error("[CHANGESTREAM-DEBUG] Failed to parse event ID from resume token",
+				"client", w.clientName,
+				"token", eventIDStr,
+				"operationType", operationType,
+				"nodeName", nodeName,
+				"error", parseErr)
+		} else {
+			w.mu.Lock()
+			oldLastEventID := w.lastEventID
+			w.lastEventID = eventID
+			w.mu.Unlock()
+
+			slog.Info("[CHANGESTREAM-DEBUG] Advanced lastEventID before filtering",
+				"client", w.clientName,
+				"oldLastEventID", oldLastEventID,
+				"newLastEventID", eventID,
+				"token", eventIDStr,
+				"operationType", operationType,
+				"nodeName", nodeName)
+		}
+
 		// Apply pipeline filter if configured
 		if w.pipelineFilter != nil {
 			// DEBUG: Log the event structure before filtering
@@ -709,16 +739,25 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 				"event", string(eventJSON))
 
 			if !w.pipelineFilter.MatchesEvent(event) {
-				slog.Warn("[CHANGESTREAM-DEBUG] Event filtered out by pipeline",
+				slog.Info("[CHANGESTREAM-DEBUG] Event filtered out by pipeline (position already advanced)",
 					"client", w.clientName,
 					"token", string(event.ResumeToken),
 					"operationType", operationType,
-					"nodeName", nodeName)
+					"nodeName", nodeName,
+					"lastEventID", eventID,
+					"eventID", eventID)
 
 				filteredCount++
 
 				continue // Skip events that don't match the pipeline
 			}
+
+			slog.Info("[CHANGESTREAM-DEBUG] Event passed pipeline filter",
+				"client", w.clientName,
+				"token", string(event.ResumeToken),
+				"operationType", operationType,
+				"nodeName", nodeName,
+				"eventID", eventID)
 		}
 
 		slog.Info("[CHANGESTREAM-DEBUG] Sending event to channel",
@@ -727,46 +766,15 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 			"operationType", operationType,
 			"nodeName", nodeName)
 
-		// Extract event ID from resume token for tracking
-		eventIDStr := string(event.ResumeToken)
-
-		var (
-			parseErr error
-			eventID  int64
-		)
-
-		eventID, parseErr = strconv.ParseInt(eventIDStr, 10, 64)
-		if parseErr != nil {
-			slog.Error("[CHANGESTREAM-DEBUG] Failed to parse event ID from resume token",
-				"client", w.clientName,
-				"token", eventIDStr,
-				"error", parseErr)
-			// Continue anyway - don't fail the whole send operation
-		}
-
 		select {
 		case w.events <- event:
 			sentCount++
 
-			// CRITICAL: Update lastEventID ONLY after event is successfully sent to channel
-			// This ensures that:
-			// 1. MarkProcessed() with empty token uses the position of the last SENT event
-			// 2. Filtered events don't advance the resume position
-			// 3. If we crash after sending but before processing, the event will be redelivered
-			if parseErr == nil {
-				w.mu.Lock()
-				w.lastEventID = eventID
-				w.mu.Unlock()
-
-				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully, updated lastEventID",
-					"client", w.clientName,
-					"token", string(event.ResumeToken),
-					"lastEventID", eventID)
-			} else {
-				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully (lastEventID not updated due to parse error)",
-					"client", w.clientName,
-					"token", string(event.ResumeToken))
-			}
+			slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully",
+				"client", w.clientName,
+				"token", string(event.ResumeToken),
+				"operationType", operationType,
+				"nodeName", nodeName)
 		case <-ctx.Done():
 			slog.Warn("[CHANGESTREAM-DEBUG] Context cancelled while sending event",
 				"client", w.clientName)
