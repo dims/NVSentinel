@@ -40,6 +40,7 @@ type PostgreSQLChangeStreamWatcher struct {
 	events         chan datastore.EventWithToken
 	stopCh         chan struct{}
 	lastEventID    int64
+	mu             sync.RWMutex // Protects lastEventID
 	pollInterval   time.Duration
 	pipelineFilter *PipelineFilter // Optional filter based on MongoDB-style pipeline
 }
@@ -75,38 +76,70 @@ func (w *PostgreSQLChangeStreamWatcher) Start(ctx context.Context) {
 
 // MarkProcessed marks events as processed up to the given token
 func (w *PostgreSQLChangeStreamWatcher) MarkProcessed(ctx context.Context, token []byte) error {
+	var eventID int64
+
 	if len(token) == 0 {
-		return nil
+		// When token is empty, use the current lastEventID (similar to MongoDB's behavior)
+		// This handles the common case where event processors pass empty tokens
+		// and expect the watcher to track its own position.
+		//
+		// In MongoDB, an empty token means "use the change stream's current resume token".
+		// In PostgreSQL, we use lastEventID which tracks the last event we read from the stream.
+		w.mu.RLock()
+		eventID = w.lastEventID
+		w.mu.RUnlock()
+
+		if eventID == 0 {
+			slog.Debug("No events processed yet, skipping MarkProcessed",
+				"client", w.clientName)
+
+			return nil
+		}
+
+		slog.Debug("Using current stream position for empty token",
+			"client", w.clientName,
+			"eventID", eventID)
+	} else {
+		// Token is the event ID as string
+		eventIDStr := string(token)
+
+		var err error
+
+		eventID, err = strconv.ParseInt(eventIDStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid token format: %w", err)
+		}
 	}
 
-	// Token is the event ID as string
-	eventIDStr := string(token)
-
-	eventID, err := strconv.ParseInt(eventIDStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid token format: %w", err)
-	}
-
-	// Mark ONLY this specific event as processed (not all events <= eventID)
-	// This prevents marking filtered events as processed
+	// Mark all events up to and including this eventID as processed
+	// This is safe because:
+	// 1. The application only calls MarkProcessed after successfully processing an event
+	// 2. Events are delivered in order (by ID)
+	// 3. If an event is filtered by the pipeline, we never send it, so MarkProcessed is never called for it
 	query := `
 		UPDATE datastore_changelog
 		SET processed = TRUE
-		WHERE id = $1 AND table_name = $2 AND processed = FALSE
+		WHERE id <= $1 AND table_name = $2 AND processed = FALSE
 	`
 
-	_, err = w.db.ExecContext(ctx, query, eventID, w.tableName)
+	_, err := w.db.ExecContext(ctx, query, eventID, w.tableName)
 	if err != nil {
 		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}
 
 	// Update resume position
+	w.mu.Lock()
 	w.lastEventID = eventID
+	w.mu.Unlock()
+
 	if err := w.saveResumePosition(ctx, eventID); err != nil {
 		slog.Error("Failed to save resume position", "error", err)
 	}
 
-	slog.Debug("Marked events processed", "eventID", eventID, "table", w.tableName)
+	slog.Info("Marked events processed",
+		"client", w.clientName,
+		"eventID", eventID,
+		"table", w.tableName)
 
 	return nil
 }
@@ -240,9 +273,13 @@ func (w *PostgreSQLChangeStreamWatcher) processChangelogRows(rows *sql.Rows) ([]
 		}
 
 		events = append(events, eventWithToken)
-		
-		// DO NOT update lastEventID here - it will be updated in sendEventsToChannel
-		// after pipeline filtering, only for events that are actually sent
+
+		// Track the last event ID we've seen from the changelog
+		// This allows MarkProcessed to use it when called with an empty token
+		w.mu.Lock()
+		w.lastEventID = id
+		w.mu.Unlock()
+
 		slog.Debug("[PROCESS-ROWS-DEBUG] Built event from changelog",
 			"client", w.clientName,
 			"changelogID", id,
@@ -389,11 +426,11 @@ func (w *PostgreSQLChangeStreamWatcher) addDocumentDataToEvent(
 						oldValuesJSON, _ := json.Marshal(oldDoc)
 						newValuesJSON, _ := json.Marshal(newDoc)
 
-						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - old_values", 
+						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - old_values",
 							"client", w.clientName,
 							"recordID", recordID,
 							"old_values", string(oldValuesJSON))
-						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - new_values", 
+						slog.Info("[CHANGESTREAM-DEBUG] UPDATE event - new_values",
 							"client", w.clientName,
 							"recordID", recordID,
 							"new_values", string(newValuesJSON))
@@ -691,34 +728,18 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 			"operationType", operationType,
 			"nodeName", nodeName)
 
-		// Extract event ID from resume token
-		eventIDStr := string(event.ResumeToken)
-		eventID, err := strconv.ParseInt(eventIDStr, 10, 64)
-		if err != nil {
-			slog.Error("[CHANGESTREAM-DEBUG] Failed to parse event ID from resume token",
-				"client", w.clientName,
-				"token", eventIDStr,
-				"error", err)
-			// Continue anyway - don't fail the whole send
-		}
-
 		select {
 		case w.events <- event:
 			sentCount++
 
-			// CRITICAL: Update lastEventID ONLY for events that are successfully sent
-			// This ensures filtered events don't advance the resume position
-			if err == nil {
-				w.lastEventID = eventID
-				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully, updated lastEventID",
-					"client", w.clientName,
-					"token", string(event.ResumeToken),
-					"lastEventID", eventID)
-			} else {
-				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully (but couldn't parse ID)",
-					"client", w.clientName,
-					"token", string(event.ResumeToken))
-			}
+			// NOTE: Do NOT update lastEventID here!
+			// The application will call MarkProcessed() after it finishes processing the event.
+			// Only MarkProcessed() should update lastEventID to ensure the resume token
+			// represents "the last event successfully processed by the application".
+			// This prevents race conditions where we crash after sending but before processing.
+			slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully",
+				"client", w.clientName,
+				"token", string(event.ResumeToken))
 		case <-ctx.Done():
 			slog.Warn("[CHANGESTREAM-DEBUG] Context cancelled while sending event",
 				"client", w.clientName)

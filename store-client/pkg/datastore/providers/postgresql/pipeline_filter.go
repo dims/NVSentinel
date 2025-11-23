@@ -203,29 +203,32 @@ func (f *PipelineFilter) matchesCondition(event map[string]interface{}, key stri
 	case "$or":
 		result := f.matchesOr(event, expectedValue)
 		slog.Info("[PIPELINE-MATCH-DEBUG] $or result", "matches", result)
+
 		return result
 	case "$and":
 		result := f.matchesAnd(event, expectedValue)
 		slog.Info("[PIPELINE-MATCH-DEBUG] $and result", "matches", result)
+
 		return result
 	default:
 		// Handle field path matching (e.g., "operationType", "fullDocument.healthevent.isfatal")
 		actualValue := f.getFieldValue(event, key)
-		
+
 		actualJSON, _ := json.Marshal(actualValue)
 		expectedJSON, _ := json.Marshal(expectedValue)
-		
+
 		slog.Info("[PIPELINE-MATCH-DEBUG] Field value comparison",
 			"key", key,
 			"actualValue", string(actualJSON),
 			"actualType", fmt.Sprintf("%T", actualValue),
 			"expectedValue", string(expectedJSON),
 			"expectedType", fmt.Sprintf("%T", expectedValue))
-		
+
 		result := f.matchesValue(actualValue, expectedValue)
 		slog.Info("[PIPELINE-MATCH-DEBUG] Field match result",
 			"key", key,
 			"matches", result)
+
 		return result
 	}
 }
@@ -324,6 +327,7 @@ func (f *PipelineFilter) matchesValue(actualValue interface{}, expectedValue int
 			"docLength", len(expectedD))
 
 		expectedMap := make(map[string]interface{})
+
 		for _, elem := range expectedD {
 			slog.Info("[PIPELINE-VALUE-DEBUG] Document element",
 				"key", elem.Key,
@@ -333,11 +337,13 @@ func (f *PipelineFilter) matchesValue(actualValue interface{}, expectedValue int
 
 		slog.Info("[PIPELINE-VALUE-DEBUG] Converted datastore.Document to map",
 			"mapKeys", getMapKeysFromInterface(expectedMap))
+
 		return f.matchesValue(actualValue, expectedMap)
 	}
 
 	// Direct value comparison
 	slog.Info("[PIPELINE-VALUE-DEBUG] Using direct comparison")
+
 	return f.matchesEqual(actualValue, expectedValue)
 }
 
@@ -379,6 +385,7 @@ func (f *PipelineFilter) matchesMapValue(actualValue interface{}, expectedMap ma
 	}
 
 	slog.Info("[PIPELINE-MAP-DEBUG] No operators or non-operators, returning true")
+
 	return true
 }
 
@@ -416,6 +423,7 @@ func (f *PipelineFilter) matchesNestedFields(actualValue interface{}, expectedFi
 	if !ok {
 		slog.Warn("[PIPELINE-NESTED-DEBUG] actualValue is not a map",
 			"actualType", fmt.Sprintf("%T", actualValue))
+
 		return false
 	}
 
@@ -429,6 +437,7 @@ func (f *PipelineFilter) matchesNestedFields(actualValue interface{}, expectedFi
 		// This is important for PostgreSQL updatedFields which uses flat keys like
 		// "healtheventstatus.nodequarantined" instead of nested maps
 		var actualFieldValue interface{}
+
 		if directValue, exists := actualMap[fieldPath]; exists {
 			slog.Info("[PIPELINE-NESTED-DEBUG] Found direct key match",
 				"fieldPath", fieldPath,
@@ -460,9 +469,11 @@ func (f *PipelineFilter) matchesNestedFields(actualValue interface{}, expectedFi
 // Helper function to get map keys from interface{}
 func getMapKeysFromInterface(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
+
 	for k := range m {
 		keys = append(keys, k)
 	}
+
 	return keys
 }
 
@@ -505,6 +516,15 @@ func (f *PipelineFilter) matchesEqual(actual, expected interface{}) bool {
 
 	if actualIsBool && expectedIsBool {
 		return actualBool == expectedBool
+	}
+
+	// CRITICAL FIX: Handle missing boolean fields
+	// When a boolean field is missing (nil) and we're comparing to false,
+	// treat the missing field as false (protobuf/JSON default value).
+	// This matches the behavior where absent boolean fields are implicitly false.
+	if actual == nil && expectedIsBool && !expectedBool {
+		slog.Info("[PIPELINE-MATCH-DEBUG] Treating missing boolean field as false")
+		return true
 	}
 
 	// Handle numbers (int, float64, etc.)

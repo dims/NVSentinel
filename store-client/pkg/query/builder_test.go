@@ -47,7 +47,7 @@ func TestBuilder_Eq(t *testing.T) {
 			expectedMongo: map[string]interface{}{
 				"healtheventstatus.nodequarantined": "Quarantined",
 			},
-			expectedSQL:  "document->'healtheventstatus'->>'nodequarantined' = $1",
+			expectedSQL:  "COALESCE(document->'healtheventstatus'->>'nodequarantined', document->'healtheventstatus'->>'nodeQuarantined') = $1",
 			expectedArgs: []interface{}{"Quarantined"},
 		},
 		{
@@ -371,7 +371,7 @@ func TestMongoFieldToJSONB(t *testing.T) {
 		{
 			name:         "column field (createdAt)",
 			mongoField:   "createdAt",
-			expectedPath: "createdAt",
+			expectedPath: "created_at",
 		},
 		{
 			name:         "nested two levels",
@@ -381,7 +381,7 @@ func TestMongoFieldToJSONB(t *testing.T) {
 		{
 			name:         "nested three levels",
 			mongoField:   "healtheventstatus.nodequarantined",
-			expectedPath: "document->'healtheventstatus'->>'nodequarantined'",
+			expectedPath: "COALESCE(document->'healtheventstatus'->>'nodequarantined', document->'healtheventstatus'->>'nodeQuarantined')",
 		},
 		{
 			name:         "deeply nested",

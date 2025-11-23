@@ -1414,7 +1414,10 @@ func WaitForNodeConditionWithCheckName(
 				condition.Reason == checkName+"IsNotHealthy" {
 				t.Logf("Checking if message matches: expected message=%s, actual message=%s", message, condition.Message)
 
-				if message == condition.Message {
+				// Check if the message contains the expected substring
+				// This allows for messages that contain multiple error codes
+				// from a remediation cycle (e.g., "ErrorCode:13...;ErrorCode:48...;ErrorCode:31...")
+				if strings.Contains(condition.Message, message) {
 					t.Logf("Found node condition: Type=%s, Reason=%s, Status=%s, Message=%s",
 						condition.Type, condition.Reason, condition.Status, condition.Message)
 
