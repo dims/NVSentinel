@@ -479,6 +479,24 @@ func getMapKeysFromInterface(m map[string]interface{}) []string {
 
 // matchesIn checks if value is in array
 func (f *PipelineFilter) matchesIn(actualValue interface{}, inArray interface{}) bool {
+	slog.Info("[PIPELINE-IN-DEBUG] Checking $in operator",
+		"actualValue", actualValue,
+		"actualType", fmt.Sprintf("%T", actualValue))
+
+	// CRITICAL FIX: NULL values never match $in arrays
+	// In MongoDB, null !== "Quarantined", null !== "Succeeded", etc.
+	if actualValue == nil {
+		slog.Info("[PIPELINE-IN-DEBUG] actualValue is nil, $in returns false")
+		return false
+	}
+
+	// CRITICAL FIX: Empty string should not match non-empty strings in $in
+	// Unless the $in array explicitly contains ""
+	if actualStr, ok := actualValue.(string); ok && actualStr == "" {
+		slog.Info("[PIPELINE-IN-DEBUG] actualValue is empty string, checking if empty string is in array")
+		// Continue to check if "" is explicitly in the array
+	}
+
 	// Convert to array
 	array, ok := inArray.([]interface{})
 	if !ok {
@@ -491,23 +509,50 @@ func (f *PipelineFilter) matchesIn(actualValue interface{}, inArray interface{})
 		}
 	}
 
-	for _, item := range array {
+	slog.Info("[PIPELINE-IN-DEBUG] Checking against array",
+		"arrayLength", len(array),
+		"array", array)
+
+	for i, item := range array {
 		if f.matchesEqual(actualValue, item) {
+			slog.Info("[PIPELINE-IN-DEBUG] Found match in array",
+				"index", i,
+				"matchedValue", item)
+
 			return true
 		}
 	}
+
+	slog.Info("[PIPELINE-IN-DEBUG] No match found in array")
 
 	return false
 }
 
 // matchesEqual checks if two values are equal
 func (f *PipelineFilter) matchesEqual(actual, expected interface{}) bool {
+	slog.Info("[PIPELINE-EQUAL-DEBUG] Comparing values",
+		"actual", actual,
+		"actualType", fmt.Sprintf("%T", actual),
+		"expected", expected,
+		"expectedType", fmt.Sprintf("%T", expected))
+
+	// Handle NULL values
+	if actual == nil || expected == nil {
+		return f.matchesNullValues(actual, expected)
+	}
+
 	// Handle type conversions
 	actualStr, actualIsStr := actual.(string)
 	expectedStr, expectedIsStr := expected.(string)
 
 	if actualIsStr && expectedIsStr {
-		return actualStr == expectedStr
+		result := actualStr == expectedStr
+		slog.Info("[PIPELINE-EQUAL-DEBUG] String comparison",
+			"actualStr", actualStr,
+			"expectedStr", expectedStr,
+			"result", result)
+
+		return result
 	}
 
 	// Handle boolean
@@ -516,15 +561,6 @@ func (f *PipelineFilter) matchesEqual(actual, expected interface{}) bool {
 
 	if actualIsBool && expectedIsBool {
 		return actualBool == expectedBool
-	}
-
-	// CRITICAL FIX: Handle missing boolean fields
-	// When a boolean field is missing (nil) and we're comparing to false,
-	// treat the missing field as false (protobuf/JSON default value).
-	// This matches the behavior where absent boolean fields are implicitly false.
-	if actual == nil && expectedIsBool && !expectedBool {
-		slog.Info("[PIPELINE-MATCH-DEBUG] Treating missing boolean field as false")
-		return true
 	}
 
 	// Handle numbers (int, float64, etc.)
@@ -536,7 +572,37 @@ func (f *PipelineFilter) matchesEqual(actual, expected interface{}) bool {
 	}
 
 	// Direct comparison
-	return actual == expected
+	result := actual == expected
+	slog.Info("[PIPELINE-EQUAL-DEBUG] Direct comparison",
+		"result", result)
+
+	return result
+}
+
+// matchesNullValues handles NULL value comparisons
+func (f *PipelineFilter) matchesNullValues(actual, expected interface{}) bool {
+	// CRITICAL FIX: Explicit NULL handling
+	// null only equals null, never equals any other value
+	if actual == nil {
+		result := expected == nil
+		slog.Info("[PIPELINE-EQUAL-DEBUG] actual is nil",
+			"expected", expected,
+			"result", result)
+
+		return result
+	}
+
+	// Handle missing boolean fields as false (protobuf/JSON default)
+	if expectedBool, ok := expected.(bool); ok && !expectedBool {
+		slog.Info("[PIPELINE-MATCH-DEBUG] Treating missing boolean field as false")
+		return true
+	}
+
+	slog.Info("[PIPELINE-EQUAL-DEBUG] expected is nil but actual is not",
+		"actual", actual,
+		"result", false)
+
+	return false
 }
 
 // matchesGreaterThan checks if actual > expected

@@ -240,6 +240,12 @@ func TestNodeDeletedDuringDrain(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
+		// Delete any existing RebootNode CRs before deleting the node
+		// This allows us to test that no NEW CRs are created after node deletion
+		t.Log("Cleaning up any existing RebootNode CRs before deleting node")
+		err = helpers.DeleteAllRebootNodeCRs(ctx, t, client)
+		require.NoError(t, err)
+
 		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
 		require.NoError(t, err)
 
@@ -254,6 +260,11 @@ func TestNodeDeletedDuringDrain(t *testing.T) {
 			_, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
 			return err != nil
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval, "node should be deleted")
+
+		// Wait for node deletion to propagate and for the node existence check
+		// to prevent any in-flight events from creating RebootNode CRs
+		t.Log("Waiting for node deletion to propagate (2 seconds)")
+		time.Sleep(2 * time.Second)
 
 		return ctx
 	})

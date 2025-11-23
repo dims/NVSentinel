@@ -61,6 +61,9 @@ type FaultRemediationClient struct {
 	templateData      TemplateData
 	annotationManager NodeAnnotationManagerInterface
 	statusChecker     *crstatus.CRStatusChecker
+	// nodeExistsFunc allows tests to override node existence checking
+	// If nil, uses the default implementation that checks with kubeClient
+	nodeExistsFunc func(ctx context.Context, nodeName string) bool
 }
 
 // TemplateData holds the data to be inserted into the template
@@ -182,6 +185,11 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 		return true, crName
 	}
 
+	// Check if node still exists before creating CR
+	if !c.nodeExists(ctx, healthEvent.NodeName) {
+		return false, ""
+	}
+
 	log.Printf("Creating RebootNode CR for node: %s", healthEvent.NodeName)
 	c.templateData.NodeName = healthEvent.NodeName
 	c.templateData.RecommendedAction = healthEvent.RecommendedAction
@@ -237,6 +245,40 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	}
 
 	return true, actualCRName
+}
+
+// nodeExists checks if a node exists in the cluster before creating a CR
+// Returns true if node exists or if there's an error checking (to avoid blocking CR creation)
+func (c *FaultRemediationClient) nodeExists(ctx context.Context, nodeName string) bool {
+	// If a custom nodeExistsFunc is set (e.g., in tests), use it
+	if c.nodeExistsFunc != nil {
+		return c.nodeExistsFunc(ctx, nodeName)
+	}
+
+	// Default implementation: check with kubeClient
+	if c.kubeClient == nil {
+		// If kubeClient is not initialized, assume node exists (shouldn't happen in production)
+		slog.Warn("kubeClient is nil, assuming node exists", "node", nodeName)
+		return true
+	}
+
+	_, err := c.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			slog.Info("Node no longer exists, skipping RebootNode CR creation",
+				"node", nodeName,
+				"reason", "node_deleted")
+
+			return false
+		}
+
+		// Other errors should be logged but we'll proceed with CR creation attempt
+		slog.Warn("Failed to check node existence, proceeding with CR creation anyway",
+			"node", nodeName,
+			"error", err)
+	}
+
+	return true
 }
 
 // handleCreateCRError handles errors from CR creation

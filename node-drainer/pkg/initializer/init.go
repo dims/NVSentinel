@@ -30,7 +30,6 @@ import (
 	sdkconfig "github.com/nvidia/nvsentinel/store-client/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	_ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers"
-	"github.com/nvidia/nvsentinel/store-client/pkg/factory"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -107,15 +106,6 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 
 	reconcilerCfg := createReconcilerConfig(*tomlCfg, databaseConfig, clientTokenConfig, pipeline, stateManager)
 
-	// Create client factory and database client
-	clientFactory := factory.NewClientFactory(databaseConfig)
-
-	// Create the database client for the reconciler to use for preprocessing
-	databaseClient, err := clientFactory.CreateDatabaseClient(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create database client: %w", err)
-	}
-
 	// Create NEW database-agnostic datastore
 	ds, err := datastore.NewDataStore(ctx, *dsConfig)
 	if err != nil {
@@ -124,16 +114,45 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 
 	slog.Info("Created datastore", "provider", dsConfig.Provider)
 
+	// Type-assert to get database client and create change stream watcher
+	// Both MongoDB and PostgreSQL datastores support these methods for backward compatibility
+	datastoreAdapter, ok := ds.(interface {
+		GetDatabaseClient() client.DatabaseClient
+		CreateChangeStreamWatcher(
+			ctx context.Context, clientName string, pipeline interface{},
+		) (datastore.ChangeStreamWatcher, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("datastore does not support required operations")
+	}
+
+	// Get database client for reconciler (still needed for legacy operations)
+	databaseClient := datastoreAdapter.GetDatabaseClient()
+
 	// Reconciler creates its own queue manager and needs the database client
 	reconciler := initializeReconciler(reconcilerCfg, params.DryRun, clientSet, informersInstance, databaseClient)
 	queueManager := reconciler.GetQueueManager()
 
-	// Create change stream watcher for both MongoDB and PostgreSQL
-	// CRITICAL: Pass the existing databaseClient to avoid creating duplicate clients
-	eventWatcher, err := clientFactory.CreateChangeStreamWatcher(ctx, databaseClient, "node-drainer", pipeline)
+	// Create change stream watcher using datastore's method
+	// This ensures PostgreSQL gets the connection string for LISTEN/NOTIFY hybrid mode
+	changeStreamWatcher, err := datastoreAdapter.CreateChangeStreamWatcher(
+		ctx, "node-drainer", pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create change stream watcher: %w", err)
 	}
+
+	// Unwrap to get the underlying client.ChangeStreamWatcher for compatibility
+	// Both MongoDB and PostgreSQL adapters support unwrapping to the legacy interface
+	type unwrapper interface {
+		Unwrap() client.ChangeStreamWatcher
+	}
+
+	unwrapable, ok := changeStreamWatcher.(unwrapper)
+	if !ok {
+		return nil, fmt.Errorf("watcher does not support unwrapping to client.ChangeStreamWatcher")
+	}
+
+	eventWatcher := unwrapable.Unwrap()
 
 	slog.Info("Initialization completed successfully")
 

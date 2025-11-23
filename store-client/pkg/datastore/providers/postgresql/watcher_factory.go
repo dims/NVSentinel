@@ -66,8 +66,20 @@ func (f *PostgreSQLWatcherFactory) CreateChangeStreamWatcher(
 		"originalTableName", tableName,
 		"postgresTableName", snakeCaseTableName)
 
-	// Create the change stream watcher using the PostgreSQL implementation
-	changeStreamWatcher := NewPostgreSQLChangeStreamWatcher(pgStore.db, clientName, snakeCaseTableName)
+	// Get connection string from the datastore
+	connString := ""
+	if pgStore.connString != "" {
+		connString = pgStore.connString
+	}
+
+	// Create the change stream watcher using hybrid mode (LISTEN/NOTIFY + fallback polling)
+	changeStreamWatcher := NewPostgreSQLChangeStreamWatcher(
+		pgStore.db,
+		clientName,
+		snakeCaseTableName,
+		connString,
+		ModeHybrid,
+	)
 
 	// Note: PostgreSQL uses triggers for change detection, not aggregation pipelines like MongoDB
 	// The Pipeline field in config is ignored for PostgreSQL as filtering happens at the application level

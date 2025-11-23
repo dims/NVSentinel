@@ -33,8 +33,9 @@ import (
 // PostgreSQLDatabaseClient implements client.DatabaseClient for PostgreSQL
 // This provides backward compatibility with services using the legacy DatabaseClient interface
 type PostgreSQLDatabaseClient struct {
-	db        *sql.DB
-	tableName string
+	db         *sql.DB
+	tableName  string
+	connString string // For creating LISTEN connections
 }
 
 // toSnakeCase converts PascalCase strings to snake_case for PostgreSQL table names
@@ -74,8 +75,25 @@ func NewPostgreSQLDatabaseClient(db *sql.DB, tableName string) client.DatabaseCl
 		"postgresTableName", snakeCaseTableName)
 
 	return &PostgreSQLDatabaseClient{
-		db:        db,
-		tableName: snakeCaseTableName,
+		db:         db,
+		tableName:  snakeCaseTableName,
+		connString: "", // Empty connString - will fall back to polling if needed
+	}
+}
+
+// NewPostgreSQLDatabaseClientWithConnString creates a client with connection string for LISTEN/NOTIFY
+func NewPostgreSQLDatabaseClientWithConnString(db *sql.DB, tableName string, connString string) client.DatabaseClient {
+	// Convert PascalCase to snake_case for PostgreSQL compatibility
+	snakeCaseTableName := toSnakeCase(tableName)
+
+	slog.Info("Creating PostgreSQL database client with LISTEN/NOTIFY support",
+		"originalTableName", tableName,
+		"postgresTableName", snakeCaseTableName)
+
+	return &PostgreSQLDatabaseClient{
+		db:         db,
+		tableName:  snakeCaseTableName,
+		connString: connString, // Store for LISTEN connections
 	}
 }
 
@@ -975,7 +993,9 @@ func (c *PostgreSQLDatabaseClient) Ping(ctx context.Context) error {
 func (c *PostgreSQLDatabaseClient) NewChangeStreamWatcher(
 	ctx context.Context, tokenConfig client.TokenConfig, pipeline interface{},
 ) (client.ChangeStreamWatcher, error) {
-	watcher := NewPostgreSQLChangeStreamWatcher(c.db, tokenConfig.ClientName, c.tableName)
+	// Default to hybrid mode for best performance, use empty connString (fallback to polling)
+	// TODO: Pass actual connString from DataStore for full hybrid functionality
+	watcher := NewPostgreSQLChangeStreamWatcher(c.db, tokenConfig.ClientName, c.tableName, c.connString, ModeHybrid)
 
 	// Apply pipeline filter if provided
 	if pipeline != nil {

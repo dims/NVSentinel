@@ -31,6 +31,7 @@ import (
 // PostgreSQLDataStore implements the DataStore interface for PostgreSQL
 type PostgreSQLDataStore struct {
 	db                    *sql.DB
+	connString            string // Connection string for creating LISTEN connections
 	maintenanceEventStore datastore.MaintenanceEventStore
 	healthEventStore      datastore.HealthEventStore
 }
@@ -78,7 +79,10 @@ func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
-	store := &PostgreSQLDataStore{db: db}
+	store := &PostgreSQLDataStore{
+		db:         db,
+		connString: connectionString, // Store for LISTEN connections
+	}
 	store.maintenanceEventStore = NewPostgreSQLMaintenanceEventStore(db)
 	store.healthEventStore = NewPostgreSQLHealthEventStore(db)
 
@@ -200,7 +204,8 @@ func (p *PostgreSQLDataStore) NewChangeStreamWatcher(
 		"clientName", clientName)
 
 	// Create and return PostgreSQL change stream watcher
-	watcher := NewPostgreSQLChangeStreamWatcher(p.db, clientName, snakeCaseTableName)
+	// Default to hybrid mode for best performance and reliability
+	watcher := NewPostgreSQLChangeStreamWatcher(p.db, clientName, snakeCaseTableName, p.connString, ModeHybrid)
 	watcher.pipelineFilter = pipelineFilter
 
 	// Wrap the watcher to provide Unwrap() support for backward compatibility
@@ -212,7 +217,7 @@ func (p *PostgreSQLDataStore) NewChangeStreamWatcher(
 // GetDatabaseClient returns a PostgreSQL implementation of client.DatabaseClient
 // This method exists for compatibility with services that type-assert for MongoDB-style operations
 func (p *PostgreSQLDataStore) GetDatabaseClient() client.DatabaseClient {
-	return NewPostgreSQLDatabaseClient(p.db, "health_events")
+	return NewPostgreSQLDatabaseClientWithConnString(p.db, "health_events", p.connString)
 }
 
 // CreateChangeStreamWatcher creates a change stream watcher for PostgreSQL
@@ -403,18 +408,53 @@ func createChangeTriggers(ctx context.Context, db *sql.DB) error {
 	triggerFunction := `
 		CREATE OR REPLACE FUNCTION log_table_changes()
 		RETURNS TRIGGER AS $$
+		DECLARE
+			changelog_id BIGINT;
 		BEGIN
 			IF TG_OP = 'DELETE' THEN
 				INSERT INTO datastore_changelog (table_name, record_id, operation, old_values)
-				VALUES (TG_TABLE_NAME, OLD.id, TG_OP, to_jsonb(OLD));
+				VALUES (TG_TABLE_NAME, OLD.id, TG_OP, to_jsonb(OLD))
+				RETURNING id INTO changelog_id;
+				
+				-- Send async notification for instant delivery
+				PERFORM pg_notify(
+					'nvsentinel_changes',
+					json_build_object(
+						'id', changelog_id,
+						'table', TG_TABLE_NAME,
+						'operation', TG_OP
+					)::text
+				);
 				RETURN OLD;
 			ELSIF TG_OP = 'UPDATE' THEN
 				INSERT INTO datastore_changelog (table_name, record_id, operation, old_values, new_values)
-				VALUES (TG_TABLE_NAME, NEW.id, TG_OP, to_jsonb(OLD), to_jsonb(NEW));
+				VALUES (TG_TABLE_NAME, NEW.id, TG_OP, to_jsonb(OLD), to_jsonb(NEW))
+				RETURNING id INTO changelog_id;
+				
+				-- Send async notification for instant delivery
+				PERFORM pg_notify(
+					'nvsentinel_changes',
+					json_build_object(
+						'id', changelog_id,
+						'table', TG_TABLE_NAME,
+						'operation', TG_OP
+					)::text
+				);
 				RETURN NEW;
 			ELSIF TG_OP = 'INSERT' THEN
 				INSERT INTO datastore_changelog (table_name, record_id, operation, new_values)
-				VALUES (TG_TABLE_NAME, NEW.id, TG_OP, to_jsonb(NEW));
+				VALUES (TG_TABLE_NAME, NEW.id, TG_OP, to_jsonb(NEW))
+				RETURNING id INTO changelog_id;
+				
+				-- Send async notification for instant delivery
+				PERFORM pg_notify(
+					'nvsentinel_changes',
+					json_build_object(
+						'id', changelog_id,
+						'table', TG_TABLE_NAME,
+						'operation', TG_OP
+					)::text
+				);
 				RETURN NEW;
 			END IF;
 			RETURN NULL;

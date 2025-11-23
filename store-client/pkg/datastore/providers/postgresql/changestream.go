@@ -24,15 +24,38 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
 const (
 	healthEventsTable = "health_events"
+	// PostgreSQL NOTIFY channel for instant change notifications
+	notifyChannel = "nvsentinel_changes"
 )
 
-// PostgreSQLChangeStreamWatcher implements ChangeStreamWatcher for PostgreSQL using polling
+// ChangeStreamMode defines the operating mode for the changestream watcher
+type ChangeStreamMode string
+
+const (
+	// ModePolling uses only polling (original implementation)
+	ModePolling ChangeStreamMode = "polling"
+	// ModeNotify uses only LISTEN/NOTIFY (experimental)
+	ModeNotify ChangeStreamMode = "notify"
+	// ModeHybrid uses LISTEN/NOTIFY with adaptive fallback polling (recommended)
+	ModeHybrid ChangeStreamMode = "hybrid"
+)
+
+// notificationPayload represents the JSON payload sent via NOTIFY
+type notificationPayload struct {
+	ID        int64  `json:"id"`        // Changelog ID
+	Table     string `json:"table"`     // Table name
+	Operation string `json:"operation"` // INSERT/UPDATE/DELETE
+}
+
+// PostgreSQLChangeStreamWatcher implements ChangeStreamWatcher for PostgreSQL
+// Supports three modes: polling (original), notify (LISTEN/NOTIFY), and hybrid (recommended)
 type PostgreSQLChangeStreamWatcher struct {
 	db             *sql.DB
 	clientName     string
@@ -40,22 +63,30 @@ type PostgreSQLChangeStreamWatcher struct {
 	events         chan datastore.EventWithToken
 	stopCh         chan struct{}
 	lastEventID    int64
-	mu             sync.RWMutex // Protects lastEventID
+	mu             sync.RWMutex // Protects lastEventID and lastNotifyTime
 	pollInterval   time.Duration
 	pipelineFilter *PipelineFilter // Optional filter based on MongoDB-style pipeline
+
+	// Hybrid mode fields
+	mode           ChangeStreamMode
+	listener       *pq.Listener // LISTEN connection for notifications
+	lastNotifyTime time.Time    // Last time we received a NOTIFY
+	connString     string       // Connection string for LISTEN
 }
 
 // NewPostgreSQLChangeStreamWatcher creates a new PostgreSQL change stream watcher
 func NewPostgreSQLChangeStreamWatcher(
-	db *sql.DB, clientName string, tableName string,
+	db *sql.DB, clientName string, tableName string, connString string, mode ChangeStreamMode,
 ) *PostgreSQLChangeStreamWatcher {
 	return &PostgreSQLChangeStreamWatcher{
 		db:           db,
 		clientName:   clientName,
 		tableName:    tableName,
+		connString:   connString,
+		mode:         mode,
 		events:       make(chan datastore.EventWithToken, 100),
 		stopCh:       make(chan struct{}),
-		pollInterval: 10 * time.Millisecond, // Aggressive poll interval for very low latency (10ms)
+		pollInterval: 10 * time.Millisecond, // Aggressive poll interval (used in polling and fallback modes)
 	}
 }
 
@@ -71,7 +102,34 @@ func (w *PostgreSQLChangeStreamWatcher) Start(ctx context.Context) {
 		slog.Error("Failed to load resume position", "client", w.clientName, "error", err)
 	}
 
-	go w.pollForChanges(ctx)
+	switch w.mode {
+	case ModePolling:
+		slog.Info("Starting PostgreSQL changestream in polling mode",
+			"client", w.clientName,
+			"pollInterval", w.pollInterval)
+
+		go w.pollForChanges(ctx)
+
+	case ModeNotify:
+		slog.Info("Starting PostgreSQL changestream in LISTEN/NOTIFY mode (experimental)",
+			"client", w.clientName)
+
+		go w.listenForNotifications(ctx)
+
+	case ModeHybrid:
+		slog.Info("Starting PostgreSQL changestream in hybrid mode (LISTEN/NOTIFY + adaptive fallback)",
+			"client", w.clientName,
+			"fallbackPollInterval", w.pollInterval)
+
+		go w.hybridChangeStream(ctx)
+
+	default:
+		slog.Error("Unknown changestream mode, defaulting to polling",
+			"client", w.clientName,
+			"mode", w.mode)
+
+		go w.pollForChanges(ctx)
+	}
 }
 
 // MarkProcessed marks events as processed up to the given token
@@ -149,6 +207,9 @@ func (w *PostgreSQLChangeStreamWatcher) Close(ctx context.Context) error {
 	close(w.stopCh)
 	close(w.events)
 
+	// Close LISTEN connection if in notify or hybrid mode
+	w.closeListener()
+
 	return nil
 }
 
@@ -182,6 +243,257 @@ func (w *PostgreSQLChangeStreamWatcher) pollForChanges(ctx context.Context) {
 
 			if err := w.fetchNewChanges(ctx); err != nil {
 				slog.Error("Error fetching changes", "table", w.tableName, "error", err)
+			}
+		}
+	}
+}
+
+// hybridChangeStream implements hybrid mode: LISTEN/NOTIFY with adaptive fallback polling
+func (w *PostgreSQLChangeStreamWatcher) hybridChangeStream(ctx context.Context) {
+	// Initialize LISTEN connection
+	if err := w.initializeListener(ctx); err != nil {
+		slog.Error("Failed to initialize LISTEN connection, falling back to polling mode",
+			"client", w.clientName,
+			"error", err)
+
+		w.pollForChanges(ctx)
+
+		return
+	}
+
+	defer w.closeListener()
+
+	// Initialize last notify time to now (assume NOTIFY is working initially)
+	w.mu.Lock()
+	w.lastNotifyTime = time.Now()
+	w.mu.Unlock()
+
+	// Start adaptive fallback polling in a separate goroutine
+	adaptiveStopCh := make(chan struct{})
+	defer close(adaptiveStopCh)
+
+	go w.adaptiveFallbackPoller(ctx, adaptiveStopCh)
+
+	// Main loop: listen for notifications
+	w.listenLoop(ctx)
+}
+
+// listenForNotifications implements pure LISTEN/NOTIFY mode (experimental)
+func (w *PostgreSQLChangeStreamWatcher) listenForNotifications(ctx context.Context) {
+	// Initialize LISTEN connection
+	if err := w.initializeListener(ctx); err != nil {
+		slog.Error("Failed to initialize LISTEN connection",
+			"client", w.clientName,
+			"error", err)
+
+		return
+	}
+
+	defer w.closeListener()
+
+	// Main loop: listen for notifications
+	w.listenLoop(ctx)
+}
+
+// initializeListener sets up the pq.Listener for LISTEN/NOTIFY
+func (w *PostgreSQLChangeStreamWatcher) initializeListener(ctx context.Context) error {
+	// Event callback for listener lifecycle events
+	eventCallback := func(ev pq.ListenerEventType, err error) {
+		switch ev {
+		case pq.ListenerEventConnected:
+			slog.Info("LISTEN connection established",
+				"client", w.clientName)
+		case pq.ListenerEventDisconnected:
+			slog.Warn("LISTEN connection lost, will reconnect",
+				"client", w.clientName,
+				"error", err)
+		case pq.ListenerEventReconnected:
+			slog.Info("LISTEN connection restored",
+				"client", w.clientName)
+		case pq.ListenerEventConnectionAttemptFailed:
+			slog.Error("LISTEN connection attempt failed",
+				"client", w.clientName,
+				"error", err)
+		}
+	}
+
+	// Create listener with automatic reconnection
+	// minReconnectInterval: 10s, maxReconnectInterval: 1min
+	w.listener = pq.NewListener(w.connString, 10*time.Second, time.Minute, eventCallback)
+
+	// Subscribe to the notification channel
+	if err := w.listener.Listen(notifyChannel); err != nil {
+		w.listener.Close()
+		return fmt.Errorf("failed to LISTEN on channel %s: %w", notifyChannel, err)
+	}
+
+	slog.Info("Successfully subscribed to NOTIFY channel",
+		"client", w.clientName,
+		"channel", notifyChannel)
+
+	return nil
+}
+
+// closeListener closes the LISTEN connection
+func (w *PostgreSQLChangeStreamWatcher) closeListener() {
+	if w.listener != nil {
+		if err := w.listener.Close(); err != nil {
+			slog.Warn("Error closing LISTEN connection",
+				"client", w.clientName,
+				"error", err)
+		} else {
+			slog.Info("Closed LISTEN connection",
+				"client", w.clientName)
+		}
+	}
+}
+
+// listenLoop is the main event loop for receiving NOTIFY messages
+func (w *PostgreSQLChangeStreamWatcher) listenLoop(ctx context.Context) {
+	slog.Info("Started LISTEN loop",
+		"client", w.clientName)
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Context cancelled, stopping LISTEN loop",
+				"client", w.clientName)
+
+			return
+
+		case <-w.stopCh:
+			slog.Info("Stop channel triggered, stopping LISTEN loop",
+				"client", w.clientName)
+
+			return
+
+		case notification := <-w.listener.Notify:
+			if notification != nil {
+				// Update last notify time for adaptive fallback
+				w.mu.Lock()
+				w.lastNotifyTime = time.Now()
+				w.mu.Unlock()
+
+				// Handle the notification
+				if err := w.handleNotification(ctx, notification); err != nil {
+					slog.Error("Error handling notification",
+						"client", w.clientName,
+						"error", err)
+				}
+			}
+
+		case <-time.After(90 * time.Second):
+			// Keepalive ping to ensure connection is alive
+			go func() {
+				if err := w.listener.Ping(); err != nil {
+					slog.Warn("LISTEN ping failed",
+						"client", w.clientName,
+						"error", err)
+				}
+			}()
+		}
+	}
+}
+
+// handleNotification processes a single NOTIFY message
+func (w *PostgreSQLChangeStreamWatcher) handleNotification(ctx context.Context, notification *pq.Notification) error {
+	// Parse the notification payload
+	var payload notificationPayload
+	if err := json.Unmarshal([]byte(notification.Extra), &payload); err != nil {
+		return fmt.Errorf("failed to parse notification payload: %w", err)
+	}
+
+	slog.Info("Received NOTIFY",
+		"client", w.clientName,
+		"changelogID", payload.ID,
+		"table", payload.Table,
+		"operation", payload.Operation)
+
+	// Fetch the full event from the changelog table
+	// We only store minimal info in the NOTIFY payload (8KB limit)
+	w.mu.RLock()
+	lastEventID := w.lastEventID
+	w.mu.RUnlock()
+
+	// Only fetch if this event is newer than what we've already processed
+	if payload.ID <= lastEventID {
+		slog.Debug("Skipping already-processed event from NOTIFY",
+			"client", w.clientName,
+			"notifiedID", payload.ID,
+			"lastEventID", lastEventID)
+
+		return nil
+	}
+
+	// Fetch any events we might have missed plus this one
+	// This handles the case where we got a notification but missed some events
+	if err := w.fetchNewChanges(ctx); err != nil {
+		return fmt.Errorf("failed to fetch changes after NOTIFY: %w", err)
+	}
+
+	return nil
+}
+
+// adaptiveFallbackPoller implements adaptive polling based on NOTIFY health
+func (w *PostgreSQLChangeStreamWatcher) adaptiveFallbackPoller(ctx context.Context, stopCh chan struct{}) {
+	// Start with infrequent polling (30s) assuming NOTIFY is working
+	checkInterval := 30 * time.Second
+	ticker := time.NewTicker(checkInterval)
+
+	defer ticker.Stop()
+
+	slog.Info("Started adaptive fallback poller",
+		"client", w.clientName,
+		"initialInterval", checkInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			// Check when we last received a NOTIFY
+			w.mu.RLock()
+			timeSinceLastNotify := time.Since(w.lastNotifyTime)
+			lastEventID := w.lastEventID
+			w.mu.RUnlock()
+
+			// Determine if NOTIFY seems to be working
+			if timeSinceLastNotify > 30*time.Second {
+				// NOTIFY might be silent or broken, poll more aggressively
+				newInterval := 5 * time.Second
+
+				if checkInterval != newInterval {
+					slog.Warn("NOTIFY appears silent, increasing fallback poll frequency",
+						"client", w.clientName,
+						"timeSinceLastNotify", timeSinceLastNotify,
+						"newInterval", newInterval)
+					checkInterval = newInterval
+					ticker.Reset(checkInterval)
+				}
+
+				// Perform fallback poll
+				slog.Info("Executing fallback poll",
+					"client", w.clientName,
+					"lastEventID", lastEventID)
+
+				if err := w.fetchNewChanges(ctx); err != nil {
+					slog.Error("Fallback poll failed",
+						"client", w.clientName,
+						"error", err)
+				}
+			} else {
+				// NOTIFY is working well, reduce fallback polling
+				newInterval := 30 * time.Second
+				if checkInterval != newInterval {
+					slog.Info("NOTIFY is healthy, reducing fallback poll frequency",
+						"client", w.clientName,
+						"timeSinceLastNotify", timeSinceLastNotify,
+						"newInterval", newInterval)
+					checkInterval = newInterval
+					ticker.Reset(checkInterval)
+				}
 			}
 		}
 	}
