@@ -26,11 +26,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestResumeTokenNotAdvancedOnSend verifies that lastEventID is NOT updated
-// when an event is sent to the channel, only when MarkProcessed is called.
-// This prevents race conditions where a crash after send but before processing
-// would cause events to be skipped on restart.
-func TestResumeTokenNotAdvancedOnSend(t *testing.T) {
+// TestResumeTokenAdvancedOnSend verifies that lastEventID IS updated
+// when an event is sent to the channel. This ensures that MarkProcessed()
+// with empty token correctly uses the position of the last SENT event.
+// When an event is sent but not yet processed, it can be redelivered on restart
+// because it hasn't been marked as processed in the database yet.
+func TestResumeTokenAdvancedOnSend(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
@@ -82,9 +83,9 @@ func TestResumeTokenNotAdvancedOnSend(t *testing.T) {
 	err = watcher.sendEventsToChannel(ctx, events)
 	require.NoError(t, err)
 
-	// Verify lastEventID was NOT updated after sending
-	assert.Equal(t, int64(0), watcher.lastEventID,
-		"lastEventID should NOT be updated in sendEventsToChannel")
+	// Verify lastEventID WAS updated after sending
+	assert.Equal(t, int64(1), watcher.lastEventID,
+		"lastEventID SHOULD be updated in sendEventsToChannel to track last sent event")
 
 	// Receive the event from channel
 	select {
@@ -102,9 +103,9 @@ func TestResumeTokenNotAdvancedOnSend(t *testing.T) {
 		err = watcher.MarkProcessed(ctx, event.ResumeToken)
 		require.NoError(t, err)
 
-		// NOW lastEventID should be updated
+		// lastEventID remains at 1 (was already set in sendEventsToChannel)
 		assert.Equal(t, int64(1), watcher.lastEventID,
-			"lastEventID should be updated only in MarkProcessed")
+			"lastEventID should remain 1 after MarkProcessed")
 
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timeout waiting for event")

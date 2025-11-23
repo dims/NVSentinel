@@ -274,12 +274,12 @@ func (w *PostgreSQLChangeStreamWatcher) processChangelogRows(rows *sql.Rows) ([]
 
 		events = append(events, eventWithToken)
 
-		// Track the last event ID we've seen from the changelog
-		// This allows MarkProcessed to use it when called with an empty token
-		w.mu.Lock()
-		w.lastEventID = id
-		w.mu.Unlock()
-
+		// NOTE: Do NOT update lastEventID here!
+		// lastEventID should only be updated in sendEventsToChannel() after the event
+		// is successfully sent to the channel. This ensures that:
+		// 1. Filtered events don't advance the resume position
+		// 2. Events are only marked as "seen" after they're actually delivered
+		// 3. MarkProcessed() with empty token uses the correct position
 		slog.Debug("[PROCESS-ROWS-DEBUG] Built event from changelog",
 			"client", w.clientName,
 			"changelogID", id,
@@ -292,8 +292,7 @@ func (w *PostgreSQLChangeStreamWatcher) processChangelogRows(rows *sql.Rows) ([]
 
 	slog.Info("[PROCESS-ROWS-DEBUG] Finished processing changelog rows",
 		"client", w.clientName,
-		"totalEvents", len(events),
-		"currentLastEventID", w.lastEventID)
+		"totalEvents", len(events))
 
 	return events, nil
 }
@@ -728,18 +727,46 @@ func (w *PostgreSQLChangeStreamWatcher) sendEventsToChannel(
 			"operationType", operationType,
 			"nodeName", nodeName)
 
+		// Extract event ID from resume token for tracking
+		eventIDStr := string(event.ResumeToken)
+
+		var (
+			parseErr error
+			eventID  int64
+		)
+
+		eventID, parseErr = strconv.ParseInt(eventIDStr, 10, 64)
+		if parseErr != nil {
+			slog.Error("[CHANGESTREAM-DEBUG] Failed to parse event ID from resume token",
+				"client", w.clientName,
+				"token", eventIDStr,
+				"error", parseErr)
+			// Continue anyway - don't fail the whole send operation
+		}
+
 		select {
 		case w.events <- event:
 			sentCount++
 
-			// NOTE: Do NOT update lastEventID here!
-			// The application will call MarkProcessed() after it finishes processing the event.
-			// Only MarkProcessed() should update lastEventID to ensure the resume token
-			// represents "the last event successfully processed by the application".
-			// This prevents race conditions where we crash after sending but before processing.
-			slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully",
-				"client", w.clientName,
-				"token", string(event.ResumeToken))
+			// CRITICAL: Update lastEventID ONLY after event is successfully sent to channel
+			// This ensures that:
+			// 1. MarkProcessed() with empty token uses the position of the last SENT event
+			// 2. Filtered events don't advance the resume position
+			// 3. If we crash after sending but before processing, the event will be redelivered
+			if parseErr == nil {
+				w.mu.Lock()
+				w.lastEventID = eventID
+				w.mu.Unlock()
+
+				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully, updated lastEventID",
+					"client", w.clientName,
+					"token", string(event.ResumeToken),
+					"lastEventID", eventID)
+			} else {
+				slog.Info("[CHANGESTREAM-DEBUG] Event sent successfully (lastEventID not updated due to parse error)",
+					"client", w.clientName,
+					"token", string(event.ResumeToken))
+			}
 		case <-ctx.Done():
 			slog.Warn("[CHANGESTREAM-DEBUG] Context cancelled while sending event",
 				"client", w.clientName)
