@@ -36,6 +36,13 @@ const (
 )
 
 func TestFatalHealthEvent(t *testing.T) {
+	// KNOWN ISSUE: This test can flake on ARM64 + PostgreSQL due to rapid state transitions.
+	// PostgreSQL's LISTEN/NOTIFY changestream is significantly faster than MongoDB's polling,
+	// causing state transitions to occur faster than the Kubernetes watch can reliably capture them.
+	// The test watcher may miss intermediate label states (e.g., quarantined, draining).
+	// This is a TEST INFRASTRUCTURE issue, not a product bug - the system works correctly,
+	// but the test's Kubernetes watch can't keep up with PostgreSQL's speed.
+	// FIXME(dims): Implement state buffering in helpers.StartNodeLabelWatcher() to handle this.
 	feature := features.New("TestFatalHealthEventEndToEnd").
 		WithLabel("suite", "smoke")
 

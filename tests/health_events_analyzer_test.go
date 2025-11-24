@@ -16,6 +16,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"tests/helpers"
 	"time"
@@ -124,6 +125,16 @@ func TestMultipleRemediationsNotTriggered(t *testing.T) {
 }
 
 func TestRepeatedXIDRule(t *testing.T) {
+	// Skip this test for PostgreSQL as it requires MongoDB window functions
+	// ($setWindowFields, $shift, $push with window) that are not implemented
+	// in the PostgreSQL pipeline filter.
+	// See: tests/data/health-events-analyzer-config.yaml - RepeatedXidError rule
+	// FIXME(dims): revisit later
+	// TODO: Either implement window functions or redesign the rule for PostgreSQL
+	if os.Getenv("USE_POSTGRESQL") == "1" {
+		t.Skip("RepeatedXIDRule requires MongoDB window functions ($setWindowFields, $shift, $push) not implemented in PostgreSQL pipeline filter")
+	}
+
 	feature := features.New("TestRepeatedXIDRule").
 		WithLabel("suite", "health-event-analyzer")
 

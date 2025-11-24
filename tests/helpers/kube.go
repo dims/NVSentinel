@@ -172,6 +172,15 @@ func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, n
 	// in TestFatalHealthEventEndToEnd. The UpdateFunc thread which has acquired the lock will be waiting for the main
 	// thead to read from the success channel. This is the desired behavior because we only want to have 1 UpdateFunc
 	// thread write true/false.
+	//
+	// KNOWN ISSUE: On ARM64 + PostgreSQL, rapid state transitions can occur faster than the Kubernetes watch
+	// can deliver updates, causing the test to miss intermediate labels. This is a test infrastructure issue,
+	// not a product bug. PostgreSQL's LISTEN/NOTIFY is significantly faster than MongoDB's polling.
+	//
+	// FIXME(dims): Implement state buffering to handle rapid transitions:
+	// - Buffer updates for 100ms before processing
+	// - Process all buffered updates in sequence
+	// - This would prevent missing intermediate states due to watch latency
 	var lock sync.Mutex
 
 	t.Logf("[LabelWatcher] Starting watcher for node %s, expecting sequence: %v (starting at index %d)",
