@@ -15,6 +15,7 @@
 package query
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -165,8 +166,19 @@ func toJSONBValue(value interface{}) string {
 		return fmt.Sprintf("%d", v)
 	case float32, float64:
 		return fmt.Sprintf("%f", v)
+	case nil:
+		return "null"
 	default:
-		// For complex types, format as JSON string
-		return fmt.Sprintf("\"%v\"", v)
+		// For complex types (structs, maps, slices), marshal to JSON
+		// This ensures structs like OperationStatus are properly serialized
+		// as JSON objects, not as string representations like "{Succeeded }"
+		jsonBytes, err := json.Marshal(v)
+		if err != nil {
+			// Fallback to string representation if marshal fails
+			// This maintains backward compatibility for edge cases
+			return fmt.Sprintf("\"%v\"", v)
+		}
+
+		return string(jsonBytes)
 	}
 }
