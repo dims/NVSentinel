@@ -1809,7 +1809,7 @@ func DeleteAllLogCollectorJobs(ctx context.Context, t *testing.T, c klient.Clien
 
 	var jobList batchv1.JobList
 
-	err := c.Resources().List(ctx, &jobList, resources.WithLabelSelector("app=log-collector"))
+	err := c.Resources(NVSentinelNamespace).List(ctx, &jobList, resources.WithLabelSelector("app=log-collector"))
 	if err != nil {
 		t.Logf("Warning: failed to list log-collector jobs: %v", err)
 		return
@@ -1826,7 +1826,7 @@ func DeleteAllLogCollectorJobs(ctx context.Context, t *testing.T, c klient.Clien
 		// Delete with PropagationPolicy=Background to also delete pods
 		deletePolicy := metav1.DeletePropagationBackground
 
-		err := c.Resources().Delete(ctx, &job, func(do *metav1.DeleteOptions) {
+		err := c.Resources(NVSentinelNamespace).Delete(ctx, &job, func(do *metav1.DeleteOptions) {
 			do.PropagationPolicy = &deletePolicy
 		})
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -1838,7 +1838,7 @@ func DeleteAllLogCollectorJobs(ctx context.Context, t *testing.T, c klient.Clien
 	require.Eventually(t, func() bool {
 		var remainingJobs batchv1.JobList
 
-		err := c.Resources().List(ctx, &remainingJobs, resources.WithLabelSelector("app=log-collector"))
+		err := c.Resources(NVSentinelNamespace).List(ctx, &remainingJobs, resources.WithLabelSelector("app=log-collector"))
 		if err != nil {
 			t.Logf("failed to list jobs: %v", err)
 			return false
@@ -1897,7 +1897,7 @@ func WaitForLogCollectorJobStatus(
 	require.Eventually(t, func() bool {
 		var jobList batchv1.JobList
 
-		err := c.Resources().List(ctx, &jobList, resources.WithLabelSelector("app=log-collector"))
+		err := c.Resources(NVSentinelNamespace).List(ctx, &jobList, resources.WithLabelSelector("app=log-collector"))
 		if err != nil {
 			t.Logf("failed to list log-collector jobs: %v", err)
 			return false
