@@ -326,6 +326,10 @@ spec:
 						ApiGroup: "janitor.dgxc.nvidia.com",
 					},
 				},
+				// Mock nodeExists to always return true for unit tests
+				nodeExistsFunc: func(ctx context.Context, nodeName string) bool {
+					return true
+				},
 			}
 			if tt.dryRun {
 				client.dryRunMode = []string{metav1.DryRunAll}
