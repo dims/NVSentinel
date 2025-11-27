@@ -39,8 +39,8 @@ spec:
       {{- if and .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
       initContainers:
         - name: fix-cert-permissions
-          image: "docker.io/bitnamilegacy/os-shell:12-debian-12-r30"
-          imagePullPolicy: IfNotPresent
+          image: "{{ .Values.global.initContainerImage.repository }}:{{ .Values.global.initContainerImage.tag }}"
+          imagePullPolicy: {{ .Values.global.initContainerImage.pullPolicy }}
           securityContext:
             runAsUser: 1001
             runAsGroup: 1001

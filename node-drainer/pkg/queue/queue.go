@@ -22,6 +22,7 @@ import (
 
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/metrics"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
 
 	"k8s.io/client-go/util/workqueue"
 )
@@ -56,8 +57,7 @@ func (m *eventQueueManager) EnqueueEventGeneric(ctx context.Context,
 	default:
 	}
 
-	// Extract eventID from the event map
-	eventID := extractEventID(event)
+	eventID := utils.ExtractEventID(event)
 
 	nodeEvent := NodeEvent{
 		NodeName: nodeName,
@@ -72,35 +72,6 @@ func (m *eventQueueManager) EnqueueEventGeneric(ctx context.Context,
 	metrics.QueueDepth.Set(float64(m.queue.Len()))
 
 	return nil
-}
-
-// extractEventID extracts the document ID from an event map
-// Tries both MongoDB (_id) and PostgreSQL (id) formats
-func extractEventID(event datastore.Event) string {
-	// Try MongoDB _id format first
-	if id, exists := event["_id"]; exists {
-		return fmt.Sprintf("%v", id)
-	}
-
-	// Try PostgreSQL id format
-	if id, exists := event["id"]; exists {
-		return fmt.Sprintf("%v", id)
-	}
-
-	// Fallback: use empty string (shouldn't happen in practice)
-	slog.Debug("No _id or id found in event", "eventKeys", getEventKeys(event))
-
-	return ""
-}
-
-// getEventKeys returns the keys of an event map for debugging
-func getEventKeys(event datastore.Event) []string {
-	keys := make([]string, 0, len(event))
-	for k := range event {
-		keys = append(keys, k)
-	}
-
-	return keys
 }
 
 // EnqueueEvent method has been removed - use EnqueueEventGeneric instead

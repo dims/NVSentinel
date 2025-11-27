@@ -237,19 +237,6 @@ func unmarshalGenericEvent(event map[string]interface{}, target interface{}) err
 	return nil
 }
 
-// extractEventID extracts the event ID from an event map (supports _id and id formats).
-func extractEventID(event datastore.Event) string {
-	if id, exists := event["_id"]; exists {
-		return fmt.Sprintf("%v", id)
-	}
-
-	if id, exists := event["id"]; exists {
-		return fmt.Sprintf("%v", id)
-	}
-
-	return ""
-}
-
 func (r *Reconciler) ProcessEventGeneric(ctx context.Context,
 	event datastore.Event, database queue.DataStore, nodeName string) error {
 	start := time.Now()
@@ -263,7 +250,7 @@ func (r *Reconciler) ProcessEventGeneric(ctx context.Context,
 		return err
 	}
 
-	eventID := extractEventID(event)
+	eventID := utils.ExtractEventID(event)
 
 	slog.Debug("Processing event", "node", nodeName, "eventID", eventID)
 

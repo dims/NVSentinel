@@ -198,7 +198,7 @@ func startMetricsServer(g *errgroup.Group, gCtx context.Context, srv server.Serv
 func startEventWatcher(ctx context.Context, components *initializer.Components, criticalError chan<- error) {
 	go func() {
 		if components.EventWatcher == nil {
-			slog.Debug("No event watcher available")
+			slog.Warn("No event watcher available")
 			<-ctx.Done()
 
 			return

@@ -41,6 +41,19 @@ func tryExtractIDFromEventID(id interface{}) (string, bool) {
 	return convertIDToString(id), true
 }
 
+// ExtractEventID extracts the event ID from an event map (supports _id and id formats).
+func ExtractEventID(event datastore.Event) string {
+	if id, exists := event["_id"]; exists {
+		return fmt.Sprintf("%v", id)
+	}
+
+	if id, exists := event["id"]; exists {
+		return fmt.Sprintf("%v", id)
+	}
+
+	return ""
+}
+
 // ExtractDocumentID extracts the document ID from a raw event.
 // For changestream events, fullDocument is checked first since event["_id"] may contain resume tokens.
 func ExtractDocumentID(event map[string]interface{}) (string, error) {

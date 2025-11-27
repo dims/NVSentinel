@@ -323,7 +323,7 @@ func (f *PipelineFilter) matchesOperators(actualValue interface{}, operators map
 			return f.matchesGreaterThan(actualValue, opValue)
 		case "$gte":
 			return f.matchesGreaterThanOrEqual(actualValue, opValue)
-		case "$lt":
+		case opLt:
 			return f.matchesLessThan(actualValue, opValue)
 		case "$lte":
 			return f.matchesLessThanOrEqual(actualValue, opValue)

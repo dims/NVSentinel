@@ -324,7 +324,7 @@ func (c *PostgreSQLDatabaseClient) convertFilterToWhereClause(
 						cond = query.Gt(key, opValue)
 					case "$gte":
 						cond = query.Gte(key, opValue)
-					case "$lt":
+					case opLt:
 						cond = query.Lt(key, opValue)
 					case opLte:
 						cond = query.Lte(key, opValue)
@@ -683,7 +683,7 @@ func (c *PostgreSQLDatabaseClient) FindOne(
 						cond = query.Gt(key, opValue)
 					case "$gte":
 						cond = query.Gte(key, opValue)
-					case "$lt":
+					case opLt:
 						cond = query.Lt(key, opValue)
 					case opLte:
 						cond = query.Lte(key, opValue)
@@ -793,7 +793,7 @@ func (c *PostgreSQLDatabaseClient) Find(
 						cond = query.Gt(key, opValue)
 					case "$gte":
 						cond = query.Gte(key, opValue)
-					case "$lt":
+					case opLt:
 						cond = query.Lt(key, opValue)
 					case opLte:
 						cond = query.Lte(key, opValue)

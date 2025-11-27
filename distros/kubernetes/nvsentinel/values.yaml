@@ -16,6 +16,10 @@ global:
   dryRun: false
   image:
     tag: "main"
+  initContainerImage:
+    repository: docker.io/bitnamilegacy/os-shell
+    tag: "12-debian-12-r30"
+    pullPolicy: IfNotPresent
   metricsPort: 2112
 
   # Datastore configuration

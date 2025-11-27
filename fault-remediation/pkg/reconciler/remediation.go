@@ -62,9 +62,9 @@ type FaultRemediationClient struct {
 	templateData      TemplateData
 	annotationManager NodeAnnotationManagerInterface
 	statusChecker     *crstatus.CRStatusChecker
-	// nodeExistsFunc allows tests to override node existence checking
-	// If nil, uses the default implementation that checks with kubeClient
-	nodeExistsFunc func(ctx context.Context, nodeName string) bool
+	// nodeExistsFunc allows tests to override node existence checking.
+	// If nil, uses the default implementation that checks with kubeClient.
+	nodeExistsFunc func(ctx context.Context, nodeName string) (*corev1.Node, error)
 }
 
 // TemplateData holds the data to be inserted into the template
@@ -272,22 +272,9 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 
 // getNodeForOwnerReference retrieves the node for setting owner reference on the CR.
 func (c *FaultRemediationClient) getNodeForOwnerReference(ctx context.Context, nodeName string) (*corev1.Node, error) {
-	// Handle unit tests without kubeClient
-	if c.kubeClient == nil {
-		if c.nodeExistsFunc != nil {
-			if !c.nodeExistsFunc(ctx, nodeName) {
-				return nil, fmt.Errorf("node does not exist (custom check)")
-			}
-
-			return &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: nodeName,
-					UID:  "test-uid-12345",
-				},
-			}, nil
-		}
-
-		return nil, fmt.Errorf("kubeClient is nil and no nodeExistsFunc provided")
+	// Use override function if provided (for testing)
+	if c.nodeExistsFunc != nil {
+		return c.nodeExistsFunc(ctx, nodeName)
 	}
 
 	node, err := c.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})

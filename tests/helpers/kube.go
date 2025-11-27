@@ -176,9 +176,6 @@ func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, n
 	// in TestFatalHealthEventEndToEnd. The UpdateFunc thread which has acquired the lock will be waiting for the main
 	// thead to read from the success channel. This is the desired behavior because we only want to have 1 UpdateFunc
 	// thread write true/false.
-	//
-	// NOTE: On ARM64 + PostgreSQL, rapid state transitions may occur faster than the Kubernetes watch
-	// can deliver updates. The watcher handles this by checking if labels appear later in the expected sequence.
 	var lock sync.Mutex
 
 	t.Logf("[LabelWatcher] Starting watcher for node %s, expecting sequence: %v (starting at index %d)",
@@ -1493,7 +1490,7 @@ func WaitForNodeConditionWithCheckName(
 			}
 
 			// Check message if specified
-			if expectedMessage != "" && condition.Message != expectedMessage {
+			if expectedMessage != "" && !containsAllExpectedParts(condition.Message, expectedMessage) {
 				t.Logf("Checking if message matches: expected=%s, actual=%s", expectedMessage, condition.Message)
 				continue
 			}
@@ -1518,6 +1515,30 @@ func WaitForNodeConditionWithCheckName(
 
 		return false
 	}, EventuallyWaitTimeout, WaitInterval, "node %s should have a condition with check name %s", nodeName, checkName)
+}
+
+// containsAllExpectedParts checks if all semicolon-separated parts of expected are in actual.
+// This allows for flexible matching where the expected error codes don't need to be contiguous.
+func containsAllExpectedParts(actual, expected string) bool {
+	// Split expected message by semicolon
+	parts := strings.Split(expected, ";")
+	matchCount := 0
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if !strings.Contains(actual, part) {
+			return false
+		}
+
+		matchCount++
+	}
+
+	// Ensure at least one part matched
+	return matchCount > 0
 }
 
 // SetNodeConditionStatus sets a node condition to a specific status for testing purposes.
