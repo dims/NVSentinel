@@ -17,6 +17,7 @@ package tests
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 	"github.com/stretchr/testify/assert"
@@ -81,6 +82,13 @@ func TestFatalHealthEvent(t *testing.T) {
 		}
 		err = helpers.StartNodeLabelWatcher(ctx, t, client, nodeName, desiredNVSentinelStateNodeLabels, nodeLabelSequenceObserved)
 		assert.NoError(t, err, "failed to start node label watcher")
+
+		// Sleep to ensure Kubernetes watch is fully established before triggering state changes
+		// This prevents missing early label transitions due to watch startup latency
+		t.Log("Waiting for watch to establish connection...")
+		time.Sleep(2 * time.Second)
+		t.Log("Watch established, ready for health event")
+
 		return ctx
 	})
 
@@ -221,6 +229,11 @@ func TestFatalHealthEvent(t *testing.T) {
 	})
 
 	feature.Assess("Observed NVSentinel expected state label changes", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		// With state buffering (1000ms window) and out-of-order sorting implemented in
+		// StartNodeLabelWatcher, we can now reliably observe rapid state transitions that occur
+		// with PostgreSQL LISTEN/NOTIFY. The watcher buffers updates and sorts them by expected
+		// sequence to capture all intermediate states even when Kubernetes watch delivers updates
+		// out of order or with significant latency.
 		select {
 		case success := <-nodeLabelSequenceObserved:
 			assert.True(t, success)

@@ -16,6 +16,11 @@ global:
   dryRun: false
   kubeVersion: 1.31.0
 
+  # NOTE: Datastore configuration is provided by:
+  # - values-tilt-mongodb.yaml (default, when USE_POSTGRESQL is not set)
+  # - values-tilt-postgresql.yaml (when USE_POSTGRESQL=1)
+  # This ensures proper configuration for both database backends
+
   nodeSelector: {}
   
   tolerations: 

@@ -41,7 +41,7 @@ type PipelineBuilder interface {
 	BuildQuarantinedAndDrainedNodesPipeline() datastore.Pipeline
 }
 
-// GetPipelineBuilder returns the appropriate pipeline builder for the current database provider.
+// GetPipelineBuilder returns the appropriate pipeline builder for the current database provider
 // The builder is selected based on the DATASTORE_PROVIDER environment variable.
 func GetPipelineBuilder() PipelineBuilder {
 	provider := os.Getenv("DATASTORE_PROVIDER")

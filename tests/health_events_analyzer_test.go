@@ -126,6 +126,7 @@ func TestMultipleRemediationsNotTriggered(t *testing.T) {
 }
 
 func TestRepeatedXIDRule(t *testing.T) {
+	// Works with both MongoDB ($setWindowFields pipeline) and PostgreSQL (XidBurstDetector).
 	feature := features.New("TestRepeatedXIDRule").
 		WithLabel("suite", "health-event-analyzer")
 
