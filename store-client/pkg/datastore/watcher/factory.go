@@ -17,9 +17,11 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/mongodb"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/postgresql"
 )
 
 // Config holds configuration for creating change stream watchers
@@ -51,6 +53,27 @@ func CreateChangeStreamWatcher(
 		}
 
 		return datastore.NewChangeStreamWatcher(ctx, mongoConfig)
+
+	case *postgresql.PostgreSQLDataStore:
+		// PostgreSQL uses trigger-based change detection, not MongoDB-style aggregation pipelines
+		// However, we can emulate pipeline filtering at the application level
+		if config.Pipeline != nil {
+			slog.Info("PostgreSQL will filter events using MongoDB pipeline emulation",
+				"reason", "PostgreSQL uses trigger-based change detection",
+				"action", "pipeline will be parsed and events filtered at application level",
+				"tableName", config.TableName,
+				"clientName", config.ClientName)
+		}
+
+		// Create PostgreSQL change stream watcher configuration
+		// Pass the pipeline - PostgreSQL will parse and emulate it
+		postgresConfig := map[string]interface{}{
+			"TableName":  config.TableName, // Use configurable table name
+			"ClientName": config.ClientName,
+			"Pipeline":   config.Pipeline, // Pass pipeline for filtering
+		}
+
+		return datastore.NewChangeStreamWatcher(ctx, postgresConfig)
 
 	default:
 		return nil, fmt.Errorf("change stream watching not supported for datastore type: %T", datastore)
