@@ -15,6 +15,8 @@
 package client
 
 import (
+	"os"
+
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
@@ -40,9 +42,18 @@ type PipelineBuilder interface {
 }
 
 // GetPipelineBuilder returns the appropriate pipeline builder for the current database provider.
-// Currently only MongoDB is supported, with PostgreSQL support planned.
+// The builder is selected based on the DATASTORE_PROVIDER environment variable.
 func GetPipelineBuilder() PipelineBuilder {
-	// Currently only MongoDB is supported
-	// PostgreSQL support will be added in a future commit
-	return NewMongoDBPipelineBuilder()
+	provider := os.Getenv("DATASTORE_PROVIDER")
+
+	switch provider {
+	case string(datastore.ProviderPostgreSQL):
+		return NewPostgreSQLPipelineBuilder()
+	case string(datastore.ProviderMongoDB), "":
+		// Default to MongoDB for backward compatibility
+		return NewMongoDBPipelineBuilder()
+	default:
+		// Fallback to MongoDB for unknown providers
+		return NewMongoDBPipelineBuilder()
+	}
 }
