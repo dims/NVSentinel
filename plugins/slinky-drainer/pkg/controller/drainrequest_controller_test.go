@@ -55,6 +55,9 @@ func TestReconcile_FullDrainCycle(t *testing.T) {
 		nvsentinelStateLabelKey: "draining",
 	})
 	pod := createSlinkyPod(t, tc, node.Name)
+	markPodReady(t, tc, pod.Name, pod.Namespace)
+	// Create a failed pod on the same node — should not block the drain.
+	createFailedPod(t, tc, node.Name)
 	createDrainRequest(t, tc, "drain-full-cycle", drainv1alpha1.DrainRequestSpec{
 		NodeName:         node.Name,
 		ErrorCode:        []string{"79"},
@@ -208,6 +211,38 @@ func createSlinkyPod(t *testing.T, tc *testEnvContext, nodeName string) *corev1.
 	require.NoError(t, tc.client.Create(tc.ctx, pod))
 
 	return pod
+}
+
+func createFailedPod(t *testing.T, tc *testEnvContext, nodeName string) {
+	t.Helper()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failed-pod-" + nodeName,
+			Namespace: testSlinkyNamespace,
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   nodeName,
+			Containers: []corev1.Container{{Name: "slurmd", Image: "nvcr.io/nvidia/slinky:latest"}},
+		},
+	}
+	require.NoError(t, tc.client.Create(tc.ctx, pod))
+
+	pod.Status.Phase = corev1.PodFailed
+	require.NoError(t, tc.client.Status().Update(tc.ctx, pod))
+}
+
+func markPodReady(t *testing.T, tc *testEnvContext, podName, podNamespace string) {
+	t.Helper()
+
+	pod := &corev1.Pod{}
+	require.NoError(t, tc.client.Get(tc.ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, pod))
+
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+	}
+	require.NoError(t, tc.client.Status().Update(tc.ctx, pod))
 }
 
 func markPodDrainReady(t *testing.T, tc *testEnvContext, podName, podNamespace string) {

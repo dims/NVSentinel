@@ -44,7 +44,6 @@ const (
 	annotationKey                    = "nodeset.slinky.slurm.net/node-cordon-reason"
 	annotationPrefix                 = "[J] [NVSentinel]"
 	nvsentinelStateLabelKey          = "dgxc.nvidia.com/nvsentinel-state"
-	remediationSucceededValue        = "remediation-succeeded"
 	drainRequestFinalizer            = "nvsentinel.nvidia.com/slinky-drainer"
 )
 
@@ -294,12 +293,26 @@ func (r *DrainRequestReconciler) checkPodsReadyForDrain(pods []corev1.Pod) (bool
 	var notReady []string
 
 	for _, pod := range pods {
+		if !isPodReady(&pod) {
+			continue
+		}
+
 		if !hasSlurmDrainCondition(&pod) {
 			notReady = append(notReady, pod.Name)
 		}
 	}
 
 	return len(notReady) == 0, notReady
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+
+	return false
 }
 
 func hasSlurmDrainCondition(pod *corev1.Pod) bool {
