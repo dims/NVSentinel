@@ -90,6 +90,9 @@ global:
   kubernetesObjectMonitor:
     enabled: true
 
+  slurmDrainMonitor:
+    enabled: true
+
   eventExporter:
     enabled: true
 

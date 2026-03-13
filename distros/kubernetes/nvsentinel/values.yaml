@@ -110,6 +110,8 @@ global:
     enabled: false
   k8sdatastoreCrds:
     enabled: false
+  slurmDrainMonitor:
+    enabled: false
     
 # Network policy configuration
 # The metrics-access network policy restricts ingress to metrics ports only.
