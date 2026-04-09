@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/nvidia/nvsentinel/preflight/pkg/config"
 	"github.com/nvidia/nvsentinel/preflight/pkg/gang"
@@ -43,6 +44,11 @@ const (
 	dshmVolumeName = "dshm"
 	// ncclTopoVolumeName is the name for the NCCL topology ConfigMap volume
 	ncclTopoVolumeName = "nccl-topo"
+
+	// PreflightChecksAnnotation is the pod annotation listing which preflight
+	// checks to run. Value is a comma-separated list of init container names.
+	// When absent, all containers with defaultEnabled (or omitted) are injected.
+	PreflightChecksAnnotation = "nvsentinel.nvidia.com/preflight-checks"
 )
 
 type PatchOperation struct {
@@ -68,6 +74,45 @@ func NewInjector(cfg *config.Config, discoverer gang.GangDiscoverer) *Injector {
 type GangContext struct {
 	GangID        string
 	ConfigMapName string
+	// CheckNames is a comma-separated list of injected check container
+	// names. Annotation order when annotation is present, chart order
+	// when using defaults.
+	CheckNames string
+}
+
+// ParseCheckNames splits a comma-separated annotation value into a list of
+// container names. Returns an error if any name appears more than once.
+// Exported so the gang controller can use the same parsing.
+func ParseCheckNames(csv string) ([]string, error) {
+	seen := make(map[string]bool)
+
+	var names []string
+
+	for _, part := range strings.Split(csv, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate check name %q in annotation %s",
+				name, PreflightChecksAnnotation)
+		}
+
+		seen[name] = true
+		names = append(names, name)
+	}
+
+	return names, nil
+}
+
+func configuredNames(specs []config.InitContainerSpec) []string {
+	names := make([]string, len(specs))
+	for i, s := range specs {
+		names[i] = s.Name
+	}
+
+	return names
 }
 
 func (i *Injector) InjectInitContainers(pod *corev1.Pod) ([]PatchOperation, *GangContext, error) {
@@ -103,7 +148,23 @@ func (i *Injector) InjectInitContainers(pod *corev1.Pod) ([]PatchOperation, *Gan
 		}
 	}
 
-	initContainers := i.buildInitContainers(pod, maxResources, gangCtx)
+	selected, err := i.selectInitContainers(pod)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	initContainers := i.buildInitContainers(pod, maxResources, gangCtx, selected)
+
+	// Compute check names for gang validation.
+	if gangCtx != nil {
+		names := make([]string, len(initContainers))
+		for idx, c := range initContainers {
+			names[idx] = c.Name
+		}
+
+		gangCtx.CheckNames = strings.Join(names, ",")
+	}
+
 	if len(initContainers) == 0 {
 		// No init containers to inject, but still return gangCtx
 		// so the controller can track gang membership
@@ -192,10 +253,77 @@ func (i *Injector) updateMax(resources corev1.ResourceList, name corev1.Resource
 	}
 }
 
+// selectInitContainers returns the subset of configured init containers to
+// inject based on the pod's preflight-checks annotation or defaultEnabled.
+func (i *Injector) selectInitContainers(pod *corev1.Pod) ([]config.InitContainerSpec, error) {
+	ann, ok := pod.Annotations[PreflightChecksAnnotation]
+	if !ok {
+		// No annotation — use defaultEnabled.
+		var result []config.InitContainerSpec
+
+		for _, spec := range i.cfg.InitContainers {
+			if spec.IsDefaultEnabled() {
+				result = append(result, spec)
+			} else {
+				slog.Debug("Init container disabled by default", "container", spec.Name)
+			}
+		}
+
+		return result, nil
+	}
+
+	// Annotation present — only inject named containers.
+	// ParseCheckNames normalizes: split, trim; rejects duplicates.
+	// An empty or whitespace/comma-only annotation yields an empty list,
+	// which disables all checks.
+	requested, err := ParseCheckNames(ann)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(requested) == 0 {
+		return nil, nil
+	}
+
+	configuredByName := make(map[string]config.InitContainerSpec, len(i.cfg.InitContainers))
+
+	for _, spec := range i.cfg.InitContainers {
+		configuredByName[spec.Name] = spec
+	}
+
+	// Walk annotation order so init container execution order matches
+	// what the user specified.
+	var result []config.InitContainerSpec
+
+	var unknown []string
+
+	for _, name := range requested {
+		spec, exists := configuredByName[name]
+		if !exists {
+			unknown = append(unknown, name)
+
+			continue
+		}
+
+		result = append(result, spec)
+	}
+
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf(
+			"annotation %s references unknown checks: %s (configured: %s)",
+			PreflightChecksAnnotation,
+			strings.Join(unknown, ", "),
+			strings.Join(configuredNames(i.cfg.InitContainers), ", "))
+	}
+
+	return result, nil
+}
+
 func (i *Injector) buildInitContainers(
 	pod *corev1.Pod,
 	maxResources corev1.ResourceList,
 	gangCtx *GangContext,
+	selected []config.InitContainerSpec,
 ) []corev1.Container {
 	var initContainers []corev1.Container
 
@@ -209,7 +337,7 @@ func (i *Injector) buildInitContainers(
 	userEnvVars := i.collectMatchingEnvVars(pod.Spec.Containers)
 	userVolumeMounts := i.collectMatchingVolumeMounts(pod.Spec.Containers)
 
-	for _, tmpl := range i.cfg.InitContainers {
+	for _, tmpl := range selected {
 		container := tmpl.DeepCopy()
 
 		if container.Resources.Requests == nil {
